@@ -1,0 +1,56 @@
+#!/bin/sh
+# canonical: ai-company - pre-merge-commit gate (cross-model review harness).
+# Fires on a clean `git merge --no-ff` into main (NO MERGE_HEAD here), so it checks the STAGED
+# merge result: a NON-TRIVIAL merge needs an eligible run-scoped v1 final marker whose immutable
+# reviewer-result CONTENT covers what is being merged. Reviewers write results; one orchestrator or
+# adjudicator finalizes through CAS. Trivial (docs/tests/data) merges pass automatically.
+# Spec: ai-company/docs/CROSS_MODEL_REVIEW_HARNESS.md
+# Bypass once (treated as a HUMAN ESCALATION, discouraged): git merge --no-verify ...
+PRIOR_GIT_DIR="$GIT_DIR"
+unset GIT_WORK_TREE GIT_DIR
+if [ -n "$AI_COMPANY_GIT_BIN" ] && [ -f "$AI_COMPANY_GIT_BIN" ]; then
+    GIT_BIN="$AI_COMPANY_GIT_BIN"
+elif command -v git >/dev/null 2>&1; then
+    GIT_BIN=$(command -v git)
+else
+    GIT_BIN=''
+fi
+[ -n "$GIT_BIN" ] && [ -f "$GIT_BIN" ] || { echo "review-gate: trusted system Git executable is unavailable" >&2; exit 1; }
+REPO_ROOT=$("$GIT_BIN" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "review-gate: cannot determine the canonical repository root" >&2
+    exit 1
+}
+# --show-toplevel above is cwd-derived, so unsetting GIT_DIR lets REPO_ROOT follow the cwd
+# while the commit still lands in the repository GIT_DIR named.  When a GIT_DIR was inherited
+# (Git exports it for a linked-worktree hook, not for a primary-worktree one), require the two
+# to agree, so the gate can never audit one worktree while another is committed to (P0-22).
+if [ -n "$PRIOR_GIT_DIR" ]; then
+    ROOT_GIT_DIR=$("$GIT_BIN" -C "$REPO_ROOT" rev-parse --path-format=absolute --git-dir 2>/dev/null) || ROOT_GIT_DIR=''
+    INHERITED_GIT_DIR=$("$GIT_BIN" --git-dir="$PRIOR_GIT_DIR" rev-parse --path-format=absolute --git-dir 2>/dev/null) || INHERITED_GIT_DIR=''
+    if [ -z "$ROOT_GIT_DIR" ] || [ -z "$INHERITED_GIT_DIR" ] || [ "$ROOT_GIT_DIR" != "$INHERITED_GIT_DIR" ]; then
+        echo "review-gate: inherited GIT_DIR does not match the repository being audited" >&2
+        exit 1
+    fi
+fi
+TRUSTED_DIGEST=$("$GIT_BIN" config --local --get ai-company.trustedReviewGateDigest 2>/dev/null || true)
+case "$TRUSTED_DIGEST" in
+    *[!0-9a-f]*|'') echo "review-gate: trusted review-gate digest is invalid" >&2; exit 1 ;;
+esac
+[ "${#TRUSTED_DIGEST}" -eq 64 ] || { echo "review-gate: trusted review-gate digest is invalid" >&2; exit 1; }
+COMMON_DIR=$("$GIT_BIN" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
+    echo "review-gate: cannot determine the common Git directory" >&2
+    exit 1
+}
+LAUNCHER_PATH="$COMMON_DIR/ai-company-runtime/t/${TRUSTED_DIGEST%${TRUSTED_DIGEST#????????????????}}/scripts/trusted_gate_launcher.ps1"
+[ -f "$LAUNCHER_PATH" ] || { echo "review-gate: trusted launcher is unavailable" >&2; exit 1; }
+if [ -n "$AI_COMPANY_POWERSHELL_BIN" ] && [ -f "$AI_COMPANY_POWERSHELL_BIN" ]; then
+    POWERSHELL_BIN="$AI_COMPANY_POWERSHELL_BIN"
+elif command -v powershell.exe >/dev/null 2>&1; then
+    POWERSHELL_BIN=$(command -v powershell.exe)
+elif command -v pwsh >/dev/null 2>&1; then
+    POWERSHELL_BIN=$(command -v pwsh)
+else
+    POWERSHELL_BIN=''
+fi
+[ -n "$POWERSHELL_BIN" ] && [ -f "$POWERSHELL_BIN" ] || { echo "review-gate: trusted PowerShell executable is unavailable" >&2; exit 1; }
+"$POWERSHELL_BIN" -NoProfile -ExecutionPolicy Bypass -File "$LAUNCHER_PATH" -TargetRoot "$REPO_ROOT" -Command check --staged || exit 1

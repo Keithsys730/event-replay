@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-company:contract:review-final-marker:1.0",
+  "title": "Review Final Marker v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repository_id",
+    "branch",
+    "base_sha",
+    "reviewed_tip_sha",
+    "run_id",
+    "author_invocation_id",
+    "reviewer_invocation_ids",
+    "result_digests",
+    "author_identity_digest",
+    "reviewer_identity_digests",
+    "finalizer_identity_digest",
+    "policy_version",
+    "verdict",
+    "production_entries",
+    "finalized_by",
+    "finalized_at",
+    "previous_marker_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "repository_id": {
+      "type": "string",
+      "format": "sha256"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "reviewed_tip_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "author_invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "reviewer_invocation_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "result_digests": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "sha256"
+      }
+    },
+    "author_identity_digest": {
+      "type": "string",
+      "format": "sha256"
+    },
+    "reviewer_identity_digests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "format": "sha256"
+      }
+    },
+    "finalizer_identity_digest": {
+      "type": "string",
+      "format": "sha256"
+    },
+    "policy_version": {
+      "type": "string",
+      "format": "semver"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "CLEAN",
+        "ACCEPT",
+        "REJECT"
+      ]
+    },
+    "production_entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(?:[0-9a-f]{40,64}|DELETED)\\t.+$"
+      }
+    },
+    "finalized_by": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "finalized_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "previous_marker_digest": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "format": "sha256"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

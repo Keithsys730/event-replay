@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-company:contract:review-result:1.0",
+  "title": "Independent Review Result v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "author_invocation_id",
+    "reviewer_invocation_id",
+    "repository_id",
+    "branch",
+    "base_sha",
+    "reviewed_tip_sha",
+    "policy_version",
+    "verdict",
+    "summary",
+    "production_entries",
+    "findings",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "author_invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "reviewer_invocation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "repository_id": {
+      "type": "string",
+      "format": "sha256"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "reviewed_tip_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "policy_version": {
+      "type": "string",
+      "format": "semver"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "CLEAN",
+        "ACCEPT",
+        "DEFECTS_FOUND",
+        "REJECT"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1024
+    },
+    "production_entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(?:[0-9a-f]{40,64}|DELETED)\\t.+$"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "code",
+          "message",
+          "evidence"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}

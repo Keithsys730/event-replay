@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-company:contract:security-review-attestation:1.0",
+  "title": "Signed Security Review Attestation v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "platform",
+    "session_id",
+    "attestor",
+    "reviewer_invocation_id",
+    "provider",
+    "model",
+    "reviewed_tip_sha",
+    "review_verdict",
+    "review_result_sha256",
+    "issued_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "attestor": { "type": "string", "pattern": "^[A-Za-z0-9._@-]{1,128}$" },
+    "reviewer_invocation_id": { "type": "string", "format": "uuid" },
+    "provider": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "reviewed_tip_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "review_verdict": { "enum": ["CLEAN", "ACCEPT", "DEFECTS_FOUND", "REJECT"] },
+    "review_result_sha256": { "type": "string", "format": "sha256" },
+    "issued_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-company:contract:review-final-marker:2.0",
+  "title": "Review Final Marker v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repository_id",
+    "branch",
+    "base_sha",
+    "reviewed_tip_sha",
+    "run_id",
+    "author_invocation_id",
+    "reviewers",
+    "author_identity_digest",
+    "finalizer_identity_digest",
+    "policy_version",
+    "verdict",
+    "production_entries",
+    "diversity_status",
+    "finalized_by",
+    "finalized_at",
+    "previous_marker_digest"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0.0"},
+    "repository_id": {"type": "string", "format": "sha256"},
+    "branch": {"type": "string", "minLength": 1},
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "reviewed_tip_sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "run_id": {"type": "string", "format": "uuid"},
+    "author_invocation_id": {"type": "string", "format": "uuid"},
+    "reviewers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["invocation_id", "provider", "model", "identity_digest", "result_digest"],
+        "properties": {
+          "invocation_id": {"type": "string", "format": "uuid"},
+          "provider": {"type": "string", "minLength": 1},
+          "model": {"type": "string", "minLength": 1},
+          "identity_digest": {"type": "string", "format": "sha256"},
+          "result_digest": {"type": "string", "format": "sha256"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "author_identity_digest": {"type": "string", "format": "sha256"},
+    "finalizer_identity_digest": {"type": "string", "format": "sha256"},
+    "policy_version": {"type": "string", "format": "semver"},
+    "verdict": {"type": "string", "enum": ["CLEAN", "ACCEPT", "REJECT"]},
+    "production_entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^(?:[0-9a-f]{40,64}|DELETED)\\t.+$"}
+    },
+    "diversity_status": {
+      "type": "string",
+      "enum": ["heterogeneous", "single-provider-degraded"]
+    },
+    "finalized_by": {"type": "string", "format": "uuid"},
+    "finalized_at": {"type": "string", "format": "date-time"},
+    "previous_marker_digest": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "string", "format": "sha256"}
+      ]
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,156 @@
+#!/bin/sh
+# Refresh the trusted bundle only after a merge into the repository's declared default branch.
+if [ "$1" = "1" ]; then
+    exit 0
+fi
+PRIOR_GIT_DIR="$GIT_DIR"
+unset GIT_WORK_TREE GIT_DIR
+if [ -n "$AI_COMPANY_GIT_BIN" ] && [ -f "$AI_COMPANY_GIT_BIN" ]; then
+    GIT_BIN="$AI_COMPANY_GIT_BIN"
+    GIT_BIN_CONFIGURED=1
+fi
+if [ -z "$GIT_BIN_CONFIGURED" ]; then
+    PWD_REAL=$(pwd -P 2>/dev/null) || PWD_REAL=''
+    [ -n "$PWD_REAL" ] || { echo "trusted-bundle-refresh: cannot resolve the current directory" >&2; exit 1; }
+    GIT_BIN=$(command -v git 2>/dev/null) || GIT_BIN=''
+    GIT_BIN_CANDIDATE=$GIT_BIN
+    case "$GIT_BIN" in
+        /*)
+            READLINK_BIN=$(command -v readlink 2>/dev/null) || READLINK_BIN=''
+            case "$READLINK_BIN" in
+                /*)
+                    READLINK_BIN_DIR=${READLINK_BIN%/*}
+                    READLINK_BIN_NAME=${READLINK_BIN##*/}
+                    READLINK_BIN_DIR=$(CDPATH= cd -P -- "$READLINK_BIN_DIR" 2>/dev/null && pwd -P) || READLINK_BIN_DIR=''
+                    case "$READLINK_BIN_DIR" in
+                        "$PWD_REAL"|"$PWD_REAL"/*) READLINK_BIN='' ;;
+                        *) [ -n "$READLINK_BIN_DIR" ] && READLINK_BIN="$READLINK_BIN_DIR/$READLINK_BIN_NAME" ;;
+                    esac
+                    ;;
+                *) READLINK_BIN='' ;;
+            esac
+            GIT_BIN_DIR=${GIT_BIN%/*}
+            GIT_BIN_NAME=${GIT_BIN##*/}
+            GIT_BIN_DIR=$(CDPATH= cd -P -- "$GIT_BIN_DIR" 2>/dev/null && pwd -P) || GIT_BIN_DIR=''
+            case "$GIT_BIN_DIR" in
+                "$PWD_REAL"|"$PWD_REAL"/*) GIT_BIN='' ;;
+                *)
+                    [ -n "$GIT_BIN_DIR" ] && GIT_BIN="$GIT_BIN_DIR/$GIT_BIN_NAME"
+                    LINK_DEPTH=0
+                    while [ -n "$GIT_BIN" ] && [ -L "$GIT_BIN" ]; do
+                        [ -n "$READLINK_BIN" ] && [ -f "$READLINK_BIN" ] && [ ! -L "$READLINK_BIN" ] || {
+                            GIT_BIN=''
+                            break
+                        }
+                        LINK_TARGET=$("$READLINK_BIN" "$GIT_BIN" 2>/dev/null) || LINK_TARGET=''
+                        [ -n "$LINK_TARGET" ] || { GIT_BIN=''; break; }
+                        case "$LINK_TARGET" in
+                            /*) ;;
+                            *) LINK_TARGET="${GIT_BIN%/*}/$LINK_TARGET" ;;
+                        esac
+                        LINK_DIR=${LINK_TARGET%/*}
+                        LINK_NAME=${LINK_TARGET##*/}
+                        LINK_DIR=$(CDPATH= cd -P -- "$LINK_DIR" 2>/dev/null && pwd -P) || LINK_DIR=''
+                        case "$LINK_DIR" in
+                            "$PWD_REAL"|"$PWD_REAL"/*) GIT_BIN='' ;;
+                            *) [ -n "$LINK_DIR" ] && GIT_BIN="$LINK_DIR/$LINK_NAME" ;;
+                        esac
+                        LINK_DEPTH=$((LINK_DEPTH + 1))
+                        [ "$LINK_DEPTH" -lt 41 ] || GIT_BIN=''
+                    done
+                    ;;
+            esac
+            ;;
+        [A-Za-z]:*)
+            GIT_BIN_REST=${GIT_BIN#??}
+            case "$GIT_BIN_REST" in
+                \\*|/*) ;;
+                *) GIT_BIN='' ;;
+            esac
+            PWD_WINDOWS=$(pwd -W 2>/dev/null) || PWD_WINDOWS=''
+            case "$GIT_BIN" in
+                "$PWD_WINDOWS"|"$PWD_WINDOWS"\\*|"$PWD_WINDOWS"/*) GIT_BIN='' ;;
+                *\\..\\*|*/../*) GIT_BIN='' ;;
+            esac
+            case "$GIT_BIN" in
+                *\\*) GIT_BIN_DIR=${GIT_BIN%\\*}; GIT_BIN_NAME=${GIT_BIN##*\\} ;;
+                */*) GIT_BIN_DIR=${GIT_BIN%/*}; GIT_BIN_NAME=${GIT_BIN##*/} ;;
+                *) GIT_BIN='' ;;
+            esac
+            if [ -n "$GIT_BIN" ]; then
+                GIT_BIN_DIR=$(CDPATH= cd -P -- "$GIT_BIN_DIR" 2>/dev/null && pwd -W) || GIT_BIN_DIR=''
+                case "$GIT_BIN_DIR" in
+                    "$PWD_WINDOWS"|"$PWD_WINDOWS"\\*|"$PWD_WINDOWS"/*) GIT_BIN='' ;;
+                    *) [ -n "$GIT_BIN_DIR" ] && GIT_BIN="$GIT_BIN_DIR/$GIT_BIN_NAME" ;;
+                esac
+            fi
+            ;;
+        *) GIT_BIN='' ;;
+    esac
+fi
+[ -n "$GIT_BIN_CONFIGURED" ] || { [ ! -L "$GIT_BIN" ] || GIT_BIN=''; }
+[ -n "$GIT_BIN" ] && [ -f "$GIT_BIN" ] || { echo "trusted-bundle-refresh: trusted Git executable is unavailable (candidate: ${GIT_BIN_CANDIDATE:-${GIT_BIN:-none}}); set AI_COMPANY_GIT_BIN or run scripts/install_hooks.py manually" >&2; exit 1; }
+REPO_ROOT=$("$GIT_BIN" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "trusted-bundle-refresh: cannot determine the repository root; run scripts/install_hooks.py manually" >&2
+    exit 1
+}
+if [ -n "$PRIOR_GIT_DIR" ]; then
+    ROOT_GIT_DIR=$("$GIT_BIN" -C "$REPO_ROOT" rev-parse --path-format=absolute --git-dir 2>/dev/null) || ROOT_GIT_DIR=''
+    INHERITED_GIT_DIR=$("$GIT_BIN" --git-dir="$PRIOR_GIT_DIR" rev-parse --path-format=absolute --git-dir 2>/dev/null) || INHERITED_GIT_DIR=''
+    if [ -z "$ROOT_GIT_DIR" ] || [ -z "$INHERITED_GIT_DIR" ] || [ "$ROOT_GIT_DIR" != "$INHERITED_GIT_DIR" ]; then
+        echo "trusted-bundle-refresh: Git repository context mismatch; run scripts/install_hooks.py manually" >&2
+        exit 1
+    fi
+fi
+DEFAULT_BRANCH=$("$GIT_BIN" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || {
+    echo "trusted-bundle-refresh: origin/HEAD is not configured; set it to the default branch, then run scripts/install_hooks.py" >&2
+    exit 1
+}
+DEFAULT_BRANCH=${DEFAULT_BRANCH#origin/}
+CURRENT_BRANCH=$("$GIT_BIN" -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null) || CURRENT_BRANCH=''
+[ -n "$CURRENT_BRANCH" ] || { echo "trusted-bundle-refresh: merge destination is detached; no trusted bundle refresh was run" >&2; exit 1; }
+[ "$CURRENT_BRANCH" = "$DEFAULT_BRANCH" ] || exit 0
+MERGE_PATHS=$("$GIT_BIN" diff-tree --no-renames --root --no-commit-id --name-only -r -m --first-parent HEAD 2>/dev/null) || {
+    echo "trusted-bundle-refresh: cannot inspect paths in the completed merge" >&2
+    exit 1
+}
+REFRESH_SOURCE_CHANGED=0
+while IFS= read -r MERGE_PATH; do
+    case "$MERGE_PATH" in
+        config/enforcement_surfaces.json|config/security_review_allowed_signers|runtime/__init__.py|runtime/orchestrator/__init__.py|runtime/orchestrator/review_state.py|runtime/orchestrator/workspace.py|runtime/orchestrator/workspace_cli.py|runtime/role_runner/__init__.py|runtime/role_runner/schema.py|scripts/trusted_gate_launcher.ps1|scripts/review_gate.py|state/contracts/invocation-identity.schema.json|state/contracts/review-final-marker.schema.json|state/contracts/review-final-marker-v2.schema.json|state/contracts/review-result.schema.json|state/contracts/security-review-attestation.schema.json|hooks/pre-commit|hooks/pre-merge-commit|hooks/post-merge|hooks/post-commit)
+            REFRESH_SOURCE_CHANGED=1
+            break
+            ;;
+    esac
+done <<EOF
+$MERGE_PATHS
+EOF
+WORKTREE_STATUS=$("$GIT_BIN" -C "$REPO_ROOT" status --porcelain --untracked-files=all 2>/dev/null) || {
+    echo "trusted-bundle-refresh: cannot verify the working tree; run scripts/install_hooks.py manually" >&2
+    exit 1
+}
+[ -z "$WORKTREE_STATUS" ] || {
+    [ "$REFRESH_SOURCE_CHANGED" -eq 1 ] || exit 0
+    echo "trusted-bundle-refresh: refresh deferred until the default-branch worktree is clean; run scripts/install_hooks.py after cleanup" >&2
+    exit 1
+}
+PYTHON_EXECUTABLE=$("$GIT_BIN" -C "$REPO_ROOT" config --local --get ai-company.pythonExecutable 2>/dev/null) || PYTHON_EXECUTABLE=''
+[ -n "$PYTHON_EXECUTABLE" ] && [ -f "$PYTHON_EXECUTABLE" ] || {
+    echo "trusted-bundle-refresh: configured ai-company.pythonExecutable is unavailable; run scripts/install_hooks.py with a trusted CPython, then retry the merge" >&2
+    exit 1
+}
+PYTHON_BLOB_PIN=$("$GIT_BIN" -C "$REPO_ROOT" config --local --get ai-company.pythonExecutableBlob 2>/dev/null) || PYTHON_BLOB_PIN=''
+case "$PYTHON_BLOB_PIN" in
+    ''|*[!0-9a-f]*) PYTHON_BLOB_PIN='' ;;
+esac
+PYTHON_BLOB_LENGTH=${#PYTHON_BLOB_PIN}
+if [ "$PYTHON_BLOB_LENGTH" -ne 40 ] && [ "$PYTHON_BLOB_LENGTH" -ne 64 ]; then
+    echo "trusted-bundle-refresh: configured ai-company.pythonExecutableBlob is missing or malformed; run scripts/install_hooks.py with a trusted CPython" >&2
+    exit 1
+fi
+PYTHON_BLOB_OBSERVED=$("$GIT_BIN" -C "$REPO_ROOT" hash-object --no-filters -- "$PYTHON_EXECUTABLE" 2>/dev/null) || PYTHON_BLOB_OBSERVED=''
+if [ "$PYTHON_BLOB_OBSERVED" != "$PYTHON_BLOB_PIN" ]; then
+    echo "trusted-bundle-refresh: configured Python executable does not match ai-company.pythonExecutableBlob; reinstall hooks with the trusted interpreter before retrying the merge" >&2
+    exit 1
+fi
+exec "$PYTHON_EXECUTABLE" -I -S -B "$REPO_ROOT/scripts/install_hooks.py" --python-executable "$PYTHON_EXECUTABLE"

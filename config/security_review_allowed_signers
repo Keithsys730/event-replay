@@ -1,0 +1,13 @@
+# OpenSSH allowed-signers file for human-confirmed security-review attestations.
+#
+# Add one line per trusted attestor in OpenSSH allowed-signers format:
+#   <attestor-principal> <key-type> <base64-public-key> [comment]
+#
+# Private keys never belong in this repository. An empty file makes
+# security-attestation verification fail closed.
+# ROTATED 2026-09-03. The previous attestor key (SHA256 fingerprint of AAAAC3NzaC1lZDI1NTE5...) was retired because its passphrase and part of its
+# key material were exposed in a working transcript, and its passphrase was subsequently found
+# to be unrecoverable. The retired public key is REMOVED rather than merely superseded: an
+# exposed credential left on a trust list is still a trusted signer. See the incident record in
+# ops/DECISIONS_PENDING.md.
+kent1@LAPTOP-JI4KIBPU ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJwKVLccN21ATFUsB39IG9pcWnTr+b/fSS85swag4bT6 kent1@LAPTOP-JI4KIBPU

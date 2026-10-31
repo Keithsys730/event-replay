@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.1.0",
+  "package_id": "ai-company-review-gate",
+  "package_version": "1.4.0",
+  "install_files": [
+    "config/enforcement_surfaces.json",
+    "config/review_gate_distribution.json",
+    "config/security_review_allowed_signers",
+    "hooks/pre-commit",
+    "hooks/pre-merge-commit",
+    "hooks/post-merge",
+    "hooks/post-commit",
+    "runtime/__init__.py",
+    "runtime/orchestrator/__init__.py",
+    "runtime/orchestrator/review_state.py",
+    "runtime/orchestrator/workspace.py",
+    "runtime/orchestrator/workspace_cli.py",
+    "runtime/role_runner/__init__.py",
+    "runtime/role_runner/schema.py",
+    "scripts/install_hooks.py",
+    "scripts/trusted_gate_launcher.ps1",
+    "scripts/review_gate.py",
+    "state/contracts/invocation-identity.schema.json",
+    "state/contracts/review-final-marker.schema.json",
+    "state/contracts/review-final-marker-v2.schema.json",
+    "state/contracts/review-result.schema.json",
+    "state/contracts/security-review-attestation.schema.json",
+    "tests/test_ai_company_review_gate_distribution.py"
+  ],
+  "migrations": [
+    {
+      "path": "tests/test_review_gate.py",
+      "action": "remove_if_sha256",
+      "allowed_sha256": [
+        "6b05a61450684d2e891f23fb9bbaad91e1ecfe0657ff21315d660ab9e488b348"
+      ],
+      "when_missing": "allow"
+    }
+  ]
+}
