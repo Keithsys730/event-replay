@@ -34,6 +34,11 @@ class EventStream:
     def count(self) -> int:
         return len(self._events)
 
+    @property
+    def events(self) -> List[RecordedEvent]:
+        """Return a copy of the events list."""
+        return list(self._events)
+
     def append(
         self,
         event_id: str,
