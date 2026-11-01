@@ -9,7 +9,9 @@ import sys
 from typing import List, Optional
 
 from event_replay.adapters.dry_run_sink import DryRunSink
+from event_replay.adapters.can_adapter import CanLogAdapter
 from event_replay.domain.bisect import bisect_failing_event
+from event_replay.domain.dbc import DbcDatabase
 from event_replay.domain.differ import StreamDiffer
 from event_replay.domain.engine import ReplayEngine
 from event_replay.domain.models import (
@@ -55,6 +57,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_bisect = subparsers.add_parser("bisect", help="Bisect a stream to isolate a poison pill event")
     p_bisect.add_argument("stream_path", type=Path, help="Path to JSONL stream file")
     p_bisect.add_argument("--failing-keyword", required=True, type=str, help="Substring triggering failure")
+
+    # Subcommand: decode-can
+    p_decode = subparsers.add_parser("decode-can", help="Decode CAN/CAN-FD/J1939 frames against a DBC database")
+    p_decode.add_argument("--dbc", required=True, type=Path, help="Path to .dbc database file")
+    p_decode.add_argument("--log", type=Path, default=None, help="Path to candump/CAN log file to decode")
+    p_decode.add_argument("--can-id", type=str, default="", help="Single CAN arbitration ID in hex (e.g. 0x18F00400)")
+    p_decode.add_argument("--payload", type=str, default="", help="Single CAN hex payload (e.g. 0102030405060708)")
+    p_decode.add_argument("--out", type=Path, default=None, help="Output JSON file path")
 
     return parser
 
@@ -164,6 +174,41 @@ def cmd_bisect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_decode_can(args: argparse.Namespace) -> int:
+    if not args.dbc.exists():
+        print(f"[ERROR] DBC file not found: {args.dbc}", file=sys.stderr)
+        return 1
+
+    dbc = DbcDatabase.from_file(args.dbc)
+
+    if args.can_id and args.payload:
+        arb_id = int(args.can_id, 16) if args.can_id.startswith("0x") or args.can_id.startswith("0X") else int(args.can_id)
+        payload = bytes.fromhex(args.payload)
+        decoded = dbc.decode_frame(arb_id, payload)
+        if decoded is None:
+            print(f"[WARN] No matching DBC message found for ID 0x{arb_id:X}", file=sys.stderr)
+            return 1
+        output_data = decoded
+    elif args.log:
+        if not args.log.exists():
+            print(f"[ERROR] Log file not found: {args.log}", file=sys.stderr)
+            return 1
+        stream = CanLogAdapter.parse_log_file(args.log)
+        output_data = CanLogAdapter.decode_stream(stream, dbc)
+    else:
+        print("[ERROR] Must provide either --log <file> or both --can-id <id> and --payload <hex>", file=sys.stderr)
+        return 1
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+        print(f"Decoded results written to {args.out}")
+    else:
+        print(json.dumps(output_data, indent=2, ensure_ascii=False))
+
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -176,6 +221,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_diff(args)
     elif args.subcommand == "bisect":
         return cmd_bisect(args)
+    elif args.subcommand == "decode-can":
+        return cmd_decode_can(args)
     return 1
 
 
