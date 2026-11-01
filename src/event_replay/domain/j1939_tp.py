@@ -11,12 +11,15 @@ Provides support for Parameter Groups larger than 8 bytes (up to 1785 bytes):
   * Sequence numbers 1 to 255
   * 7 payload bytes per packet with 0xFF padding on final packet
 - Multi-Session Reassembler (J1939TransportReassembler)
-  * Tracks concurrent BAM and peer-to-peer unicast sessions
+  * Tracks concurrent BAM and peer-to-peer unicast sessions per CAN channel
+  * Supports receiver and transmitter Connection Aborts
   * Out-of-order packet reordering by sequence number
+  * Validates total_packets == ceil(total_bytes / 7)
   * Exact payload truncation (stripping trailing padding)
   * Seamless conversion to high-level J1939Message
 - Message Segmenter (segment_j1939_message)
   * Generates compliant TP.CM and TP.DT frame sequences from large payloads
+  * Preserves message.destination_address in unicast RTS sessions
 """
 
 from __future__ import annotations
@@ -74,6 +77,7 @@ class TpSession:
     total_packets: int
     is_bam: bool
     priority: int = 6
+    channel: str = "can0"
     packets: Dict[int, bytes] = field(default_factory=dict)
     aborted: bool = False
     abort_reason: Optional[int] = None
@@ -109,19 +113,23 @@ class TpSession:
         buffer = bytearray()
         for seq in range(1, self.total_packets + 1):
             buffer.extend(self.packets[seq])
+        if len(buffer) < self.total_bytes:
+            raise ValueError(
+                f"Assembled payload length {len(buffer)} is less than expected {self.total_bytes} bytes"
+            )
         return bytes(buffer[:self.total_bytes])
 
 
 class J1939TransportReassembler:
     """State machine that reassembles multi-packet SAE J1939 TP streams.
     
-    Maintains concurrent sessions keyed by (source_address, destination_address).
+    Maintains concurrent sessions keyed by (channel, source_address, destination_address).
     For BAM broadcasts, destination_address is always 0xFF.
     """
 
     def __init__(self) -> None:
-        # Key: (source_address, destination_address)
-        self.active_sessions: Dict[Tuple[int, int], TpSession] = {}
+        # Key: (channel, source_address, destination_address)
+        self.active_sessions: Dict[Tuple[str, int, int], TpSession] = {}
         # History of completed or aborted sessions for diagnostics
         self.completed_count: int = 0
         self.aborted_count: int = 0
@@ -141,15 +149,19 @@ class J1939TransportReassembler:
         except ValueError:
             return None
 
+        # J1939 Transport Protocol is strictly located on Data Page 0 (EDP=0, DP=0)
+        if header.edp != 0 or header.dp != 0:
+            return None
+
         if header.pgn == PGN_TP_CM:
-            self._handle_cm(header, frame.data)
+            self._handle_cm(header, frame.data, channel=frame.channel)
             return None
         elif header.pgn == PGN_TP_DT:
-            return self._handle_dt(header, frame.data)
+            return self._handle_dt(header, frame.data, channel=frame.channel)
 
         return None
 
-    def _handle_cm(self, header: J1939Header, data: bytes) -> None:
+    def _handle_cm(self, header: J1939Header, data: bytes, channel: str = "can0") -> None:
         """Process a TP.CM (Connection Management) frame."""
         if len(data) < 8:
             return
@@ -166,11 +178,18 @@ class J1939TransportReassembler:
             total_packets = data[3]
             is_bam = (control_byte == TpControlByte.BAM)
 
-            if total_bytes < 9 or total_bytes > MAX_TP_MESSAGE_SIZE or total_packets < 2 or total_packets > MAX_TP_PACKETS:
+            expected_packets = math.ceil(total_bytes / TP_PACKET_DATA_SIZE)
+            if (
+                total_bytes < 9
+                or total_bytes > MAX_TP_MESSAGE_SIZE
+                or total_packets < 2
+                or total_packets > MAX_TP_PACKETS
+                or total_packets != expected_packets
+            ):
                 # Invalid TP announcement
                 return
 
-            session_key = (sa, da)
+            session_key = (channel, sa, da)
             self.active_sessions[session_key] = TpSession(
                 source_address=sa,
                 destination_address=da,
@@ -179,29 +198,32 @@ class J1939TransportReassembler:
                 total_packets=total_packets,
                 is_bam=is_bam,
                 priority=header.priority,
+                channel=channel,
             )
 
         elif control_byte == TpControlByte.ABORT:
             abort_reason = data[1]
-            session_key = (sa, da)
-            if session_key in self.active_sessions:
-                sess = self.active_sessions.pop(session_key)
-                sess.aborted = True
-                sess.abort_reason = abort_reason
-                self.aborted_count += 1
+            # In peer-to-peer sessions, either originator (sa, da) or responder (da, sa) can abort
+            for key in [(channel, sa, da), (channel, da, sa)]:
+                if key in self.active_sessions and self.active_sessions[key].pgn == target_pgn:
+                    sess = self.active_sessions.pop(key)
+                    sess.aborted = True
+                    sess.abort_reason = abort_reason
+                    self.aborted_count += 1
+                    break
 
-    def _handle_dt(self, header: J1939Header, data: bytes) -> Optional[J1939Message]:
+    def _handle_dt(self, header: J1939Header, data: bytes, channel: str = "can0") -> Optional[J1939Message]:
         """Process a TP.DT (Data Transfer) packet."""
         if len(data) < 2:
             return None
 
         sa = header.source_address
         da = header.destination_address if header.destination_address is not None else J1939_GLOBAL_ADDRESS
-        session_key = (sa, da)
+        session_key = (channel, sa, da)
 
         session = self.active_sessions.get(session_key)
         if session is None:
-            # No active session matching this source and destination
+            # No active session matching this channel, source and destination
             return None
 
         seq_num = data[0]
@@ -231,14 +253,17 @@ def segment_j1939_message(
     is_bam: bool = True,
     destination_address: Optional[int] = None,
     priority: int = 7,
+    channel: str = "can0",
 ) -> List[CanFdFrame]:
     """Segment a J1939Message with payload > 8 bytes into TP.CM and TP.DT CAN frames.
     
     Args:
         message: The high-level J1939Message to transmit.
         is_bam: True for Broadcast Announce Message (BAM); False for peer-to-peer RTS.
-        destination_address: Target node address (used for RTS/CTS peer-to-peer).
+        destination_address: Target node address (used for RTS/CTS peer-to-peer). If None,
+            falls back to message.destination_address.
         priority: Transmission priority (0..7, defaults to 7 for BAM).
+        channel: CAN channel interface name (e.g. 'can0').
 
     Returns:
         A list of CanFdFrames (one TP.CM frame followed by N TP.DT frames).
@@ -259,7 +284,14 @@ def segment_j1939_message(
 
     frames: List[CanFdFrame] = []
     sa = message.source_address
-    da = J1939_GLOBAL_ADDRESS if is_bam else (destination_address if destination_address is not None else 0x00)
+    if is_bam:
+        da = J1939_GLOBAL_ADDRESS
+    elif destination_address is not None:
+        da = destination_address
+    elif message.destination_address is not None:
+        da = message.destination_address
+    else:
+        da = 0x00
 
     # 1. Build TP.CM Frame
     cm_header = J1939Header.build(
@@ -291,6 +323,7 @@ def segment_j1939_message(
         arbitration_id=cm_header.to_can_id(),
         data=bytes(cm_payload),
         is_extended_id=True,
+        channel=channel,
     ))
 
     # 2. Build TP.DT Frames
@@ -315,6 +348,7 @@ def segment_j1939_message(
             arbitration_id=dt_header.to_can_id(),
             data=dt_payload,
             is_extended_id=True,
+            channel=channel,
         ))
 
     return frames

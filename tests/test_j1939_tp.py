@@ -322,3 +322,110 @@ def test_cli_decode_can_tp_and_no_tp_flag(tmp_path: Path):
     # Without TP reassembly, raw 6 frames are emitted as UNKNOWN
     assert len(data2) == 6
     assert all(r["message_name"] == "UNKNOWN" for r in data2)
+
+
+def test_receiver_abort_peer_to_peer():
+    """Verify receiver Connection Abort (Conn_Abort) terminates session (Finding 1 [P1])."""
+    payload = b"0123456789ABCDEF0123456789"
+    hdr = J1939Header.build(pgn=0xEF00, source_address=0x10, destination_address=0x20)
+    msg = J1939Message(header=hdr, data=payload)
+    frames = segment_j1939_message(msg, is_bam=False, destination_address=0x20)
+
+    reassembler = J1939TransportReassembler()
+    reassembler.feed_frame(frames[0])
+    assert len(reassembler.active_sessions) == 1
+
+    # Node 0x20 (receiver) transmits Conn_Abort back to Node 0x10
+    abort_hdr = J1939Header.build(pgn=0xEC00, source_address=0x20, destination_address=0x10)
+    abort_data = bytes([TpControlByte.ABORT, TpAbortReason.SYSTEM_RESOURCES, 0xFF, 0xFF, 0xFF, 0x00, 0xEF, 0x00])
+    abort_frame = CanFdFrame(arbitration_id=abort_hdr.to_can_id(), data=abort_data, is_extended_id=True)
+    reassembler.feed_frame(abort_frame)
+
+    assert len(reassembler.active_sessions) == 0
+    assert reassembler.aborted_count == 1
+
+    # In-flight DT packets must not resurrect aborted session
+    assert reassembler.feed_frame(frames[1]) is None
+
+
+def test_non_tp_dp1_extended_frame_not_dropped():
+    """Verify DP=1 frame with PF=0xEC is not dropped as false-positive TP (Finding 2 [P1])."""
+    from event_replay.domain.stream import EventStream
+    dbc_content = """
+VERSION ""
+NS_ :
+BS_:
+BU_: ECU1 ECU2
+BO_ 2582380544 DP1_CustomMessage: 8 ECU1
+ SG_ TestSignal : 0|16@1+ (1,0) [0|65535] "" ECU2
+"""
+    db = DbcDatabase.from_text(dbc_content)
+
+    # CAN ID 0x19EC0000: Priority 6, DP=1, PF=0xEC, DA=0x00, SA=0x00
+    frame = CanFdFrame(
+        arbitration_id=0x19EC0000,
+        data=bytes([0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        is_extended_id=True,
+    )
+    stream = EventStream(name="test_stream")
+    stream.append_raw(frame.to_recorded_event(seq_id=1))
+
+    decoded = CanLogAdapter.decode_stream(stream, db, reassemble_tp=True)
+    assert len(decoded) == 1
+    assert decoded[0]["message_name"] == "DP1_CustomMessage"
+    assert decoded[0]["signals"]["TestSignal"] == 0x3412
+
+
+def test_invalid_total_packets_mismatch_rejected():
+    """Verify TP.CM with total_packets != ceil(total_bytes / 7) is rejected (Finding 3 [P1])."""
+    # Malformed BAM announcement: total_bytes = 20, but total_packets = 2 (should be 3)
+    cm_hdr = J1939Header.build(pgn=0xEC00, source_address=0x10, destination_address=0xFF)
+    cm_data = bytes([TpControlByte.BAM, 20, 0, 2, 0xFF, 0x00, 0xFE, 0x00])
+    cm_frame = CanFdFrame(arbitration_id=cm_hdr.to_can_id(), data=cm_data, is_extended_id=True)
+
+    reassembler = J1939TransportReassembler()
+    reassembler.feed_frame(cm_frame)
+    # Session must be rejected immediately
+    assert len(reassembler.active_sessions) == 0
+
+    dt_hdr = J1939Header.build(pgn=0xEB00, source_address=0x10, destination_address=0xFF)
+    dt1 = CanFdFrame(arbitration_id=dt_hdr.to_can_id(), data=bytes([1]) + b"1234567", is_extended_id=True)
+    assert reassembler.feed_frame(dt1) is None
+
+
+def test_segment_message_preserves_destination_address():
+    """Verify segment_j1939_message preserves message.destination_address in unicast (Finding 4 [P2])."""
+    hdr = J1939Header.build(pgn=0xEF00, source_address=0x10, destination_address=0x25)
+    msg = J1939Message(header=hdr, data=bytes(20))
+    frames = segment_j1939_message(msg, is_bam=False)
+    cm_hdr = J1939Header.parse_can_id(frames[0].arbitration_id)
+    assert cm_hdr.destination_address == 0x25
+
+
+def test_multichannel_tp_session_isolation():
+    """Verify separate CAN channels with identical node addresses do not collide (Finding 5 [P2])."""
+    reassembler = J1939TransportReassembler()
+
+    payload0 = b"CHANNEL_0_DATA_20B!"
+    msg0 = J1939Message(header=J1939Header.build(pgn=0xFECA, source_address=0x10), data=payload0)
+    frames0 = segment_j1939_message(msg0, is_bam=True, channel="can0")
+
+    payload1 = b"CHANNEL_1_DATA_20B!"
+    msg1 = J1939Message(header=J1939Header.build(pgn=0xFECA, source_address=0x10), data=payload1)
+    frames1 = segment_j1939_message(msg1, is_bam=True, channel="can1")
+
+    reassembler.feed_frame(frames0[0])
+    reassembler.feed_frame(frames1[0])
+    assert len(reassembler.active_sessions) == 2
+
+    for i in range(1, len(frames0) - 1):
+        reassembler.feed_frame(frames0[i])
+        reassembler.feed_frame(frames1[i])
+
+    re0 = reassembler.feed_frame(frames0[-1])
+    assert re0 is not None
+    assert re0.data == payload0
+
+    re1 = reassembler.feed_frame(frames1[-1])
+    assert re1 is not None
+    assert re1.data == payload1

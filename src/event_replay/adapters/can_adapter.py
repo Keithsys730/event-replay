@@ -76,10 +76,11 @@ class CanLogAdapter:
             try:
                 frame = CanFdFrame.from_recorded_event(event)
 
-                # Check for J1939 Transport Protocol frames
+                # Check for J1939 Transport Protocol frames (strictly Data Page 0 with EDP=0, DP=0)
                 if reassembler is not None and (frame.is_extended_id or frame.arbitration_id > 0x7FF):
+                    dp_edp = (frame.arbitration_id >> 24) & 0x03
                     pf = (frame.arbitration_id >> 16) & 0xFF
-                    if pf in (0xEC, 0xEB):  # TP.CM (0xEC) or TP.DT (0xEB)
+                    if dp_edp == 0 and pf in (0xEC, 0xEB):  # TP.CM (0xEC) or TP.DT (0xEB) on Data Page 0
                         reassembled_msg = reassembler.feed_frame(frame)
                         if reassembled_msg is not None:
                             re_can_id = reassembled_msg.header.to_can_id()
