@@ -17,6 +17,22 @@ from event_replay.domain.j1939_tp import (
     PGN_TP_DT,
 )
 from event_replay.domain.dbc import DbcDatabase, DbcMessage, DbcSignal
+from event_replay.domain.diagnostics import (
+    PGN_DM1_ACTIVE_DTC,
+    PGN_DM2_PREV_ACTIVE_DTC,
+    LampStatus,
+    FlashState,
+    J1939LampState,
+    J1939DTC,
+    J1939DiagnosticMessage,
+    UdsServiceId,
+    UdsNegativeResponseCode,
+    UdsSessionType,
+    UdsMessage,
+    DiagnosticFaultInjector,
+    format_j1939_diagnostics,
+    format_uds_diagnostics,
+)
 from event_replay.adapters.can_adapter import CanLogAdapter
 
 __version__ = "0.1.0"
@@ -38,5 +54,19 @@ __all__ = [
     "DbcDatabase",
     "DbcMessage",
     "DbcSignal",
+    "PGN_DM1_ACTIVE_DTC",
+    "PGN_DM2_PREV_ACTIVE_DTC",
+    "LampStatus",
+    "FlashState",
+    "J1939LampState",
+    "J1939DTC",
+    "J1939DiagnosticMessage",
+    "UdsServiceId",
+    "UdsNegativeResponseCode",
+    "UdsSessionType",
+    "UdsMessage",
+    "DiagnosticFaultInjector",
+    "format_j1939_diagnostics",
+    "format_uds_diagnostics",
     "CanLogAdapter",
 ]
