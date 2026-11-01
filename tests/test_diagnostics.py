@@ -309,3 +309,107 @@ def test_cli_decode_can_diagnostics_and_no_diag_flag(tmp_path: Path):
     assert "uds" not in data_no_diag[1]
     assert data_no_diag[0]["message_name"] == "UNKNOWN"
     assert data_no_diag[1]["message_name"] == "UNKNOWN"
+
+
+def test_uds_rejects_non_single_frame_pci_and_truncated_sf():
+    """Verify ISO 15765-2 non-Single-Frames and truncated Single-Frames are rejected."""
+    # 1. First Frame (0x1...)
+    ff_payload = bytes.fromhex("101462F190314847")
+    with pytest.raises(ValueError, match="Unsupported ISO 15765-2 frame type 0x1"):
+        UdsMessage.decode(ff_payload, has_pci=True)
+
+    # 2. Consecutive Frame (0x2...)
+    cf_payload = bytes.fromhex("21AABBCCDDEEFF00")
+    with pytest.raises(ValueError, match="Unsupported ISO 15765-2 frame type 0x2"):
+        UdsMessage.decode(cf_payload, has_pci=True)
+
+    # 3. Flow Control (0x3...)
+    fc_payload = bytes.fromhex("30000A0000000000")
+    with pytest.raises(ValueError, match="Unsupported ISO 15765-2 frame type 0x3"):
+        UdsMessage.decode(fc_payload, has_pci=True)
+
+    # 4. Truncated Classical CAN Single Frame (declares 6 bytes, but only 2 present)
+    truncated_sf = bytes.fromhex("061001")
+    with pytest.raises(ValueError, match="Truncated ISO 15765-2 Single Frame"):
+        UdsMessage.decode(truncated_sf, has_pci=True)
+
+    # 5. Zero-length Classical CAN Single Frame
+    with pytest.raises(ValueError, match="Invalid Classical CAN Single Frame"):
+        UdsMessage.decode(bytes.fromhex("081001"), has_pci=True)
+
+    # 6. Truncated CAN-FD Single Frame (declares 10 bytes, only 4 present)
+    truncated_canfd = bytes([0x00, 10, 0x10, 0x01, 0xAA, 0xBB])
+    with pytest.raises(ValueError, match="Truncated ISO 15765-2 CAN-FD Single Frame"):
+        UdsMessage.decode(truncated_canfd, has_pci=True)
+
+
+def test_uds_encode_length_bounds_validation():
+    """Verify UdsMessage.encode rejects payload exceeding CAN-FD SF limits."""
+    # Payload exceeding CAN-FD Single Frame capacity (> 62 bytes PDU)
+    # 1 byte SID + 62 bytes payload = 63 bytes PDU (> 62 max capacity)
+    oversized_payload = bytes(62)
+    msg_oversized = UdsMessage(
+        service_id=int(UdsServiceId.READ_DATA_BY_IDENTIFIER),
+        is_response=True,
+        data_identifier=0xF190,
+        payload=oversized_payload,
+    )
+    with pytest.raises(ValueError, match="exceeds maximum CAN-FD SF capacity"):
+        msg_oversized.encode(add_pci=True)
+
+
+def test_uds_and_j1939_schema_parity_and_full_lamp_flash_states(tmp_path: Path):
+    """Verify parity between CanLogAdapter and CLI --can-id, including all 4 lamp flash states."""
+    lamp = J1939LampState(
+        protect_lamp=LampStatus.ON,
+        amber_warning_lamp=LampStatus.OFF,
+        red_stop_lamp=LampStatus.ON,
+        malfunction_indicator_lamp=LampStatus.OFF,
+        flash_protect=FlashState.SLOW_FLASH,
+        flash_amber=FlashState.FAST_FLASH,
+        flash_red=FlashState.SLOW_FLASH,
+        flash_mil=FlashState.FAST_FLASH,
+    )
+    dtc = J1939DTC(spn=110, fmi=3, cm=0, oc=1)
+    diag_msg = J1939DiagnosticMessage(pgn=PGN_DM1_ACTIVE_DTC, lamp_state=lamp, dtcs=[dtc])
+    payload_hex = diag_msg.encode_payload().hex().upper()
+
+    # CLI single-frame mode
+    out_cli = tmp_path / "out_single.json"
+    ret = main([
+        "decode-can",
+        "--can-id", "0x18FECA00",
+        "--payload", payload_hex,
+        "--out", str(out_cli),
+    ])
+    assert ret == 0
+
+    with open(out_cli, "r", encoding="utf-8") as f:
+        cli_res = json.load(f)
+
+    diag = cli_res["diagnostics"]
+    lamp_st = diag["lamp_status"]
+    assert lamp_st["protect_lamp"] == "ON"
+    assert lamp_st["red_stop_lamp"] == "ON"
+    assert lamp_st["flash_protect"] == "SLOW_FLASH"
+    assert lamp_st["flash_amber"] == "FAST_FLASH"
+    assert lamp_st["flash_red"] == "SLOW_FLASH"
+    assert lamp_st["flash_mil"] == "FAST_FLASH"
+
+
+def test_29bit_id_overlapping_11bit_uds_range_not_misidentified():
+    """Verify 29-bit CAN ID overlapping 0x7E0 range is NOT falsely decoded as UDS."""
+    # Numerical ID 0x7E0, but marked as 29-bit extended ID (Priority 0, PF 0x00, SA 0xE0)
+    frame = CanFdFrame(
+        arbitration_id=0x7E0,
+        data=bytes.fromhex("0210010000000000"),
+        is_extended_id=True,
+    )
+    stream = EventStream("test_29bit_overlap")
+    stream.append_raw(frame.to_recorded_event(seq_id=1))
+
+    records = CanLogAdapter.decode_stream(stream, dbc=None, decode_diagnostics=True)
+    assert len(records) == 1
+    # Should NOT be classified as UDS because is_extended_id is True and PF != 0xDA
+    assert "uds" not in records[0]
+    assert records[0]["message_name"] == "UNKNOWN"

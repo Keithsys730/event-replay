@@ -354,14 +354,32 @@ class UdsMessage:
         if has_pci:
             # ISO 15765-2 Single Frame (SF) detection
             first_nibble = (raw_payload[0] >> 4) & 0x0F
-            if first_nibble == 0x0:
-                sf_dl = raw_payload[0] & 0x0F
-                if sf_dl == 0 and len(raw_payload) > 1:
-                    # CAN-FD extended SF format: 0x00 followed by 1 byte DL
-                    sf_dl = raw_payload[1]
-                    pdu = raw_payload[2:2 + sf_dl]
-                else:
-                    pdu = raw_payload[1:1 + sf_dl]
+            if first_nibble != 0x0:
+                raise ValueError(
+                    f"Unsupported ISO 15765-2 frame type 0x{first_nibble:X}: only Single Frame (0x0) is supported"
+                )
+
+            sf_dl = raw_payload[0] & 0x0F
+            if sf_dl == 0:
+                # CAN-FD extended SF format: 0x00 followed by 1 byte DL
+                if len(raw_payload) < 2:
+                    raise ValueError("CAN-FD Single Frame missing extended length byte")
+                sf_dl = raw_payload[1]
+                if sf_dl == 0 or sf_dl > 62:
+                    raise ValueError(f"Invalid CAN-FD Single Frame data length: {sf_dl}")
+                pdu = raw_payload[2:2 + sf_dl]
+                if len(pdu) < sf_dl:
+                    raise ValueError(
+                        f"Truncated ISO 15765-2 CAN-FD Single Frame: expected {sf_dl} bytes, got {len(pdu)}"
+                    )
+            else:
+                if sf_dl > 7:
+                    raise ValueError(f"Invalid Classical CAN Single Frame data length: {sf_dl}")
+                pdu = raw_payload[1:1 + sf_dl]
+                if len(pdu) < sf_dl:
+                    raise ValueError(
+                        f"Truncated ISO 15765-2 Single Frame: expected {sf_dl} bytes, got {len(pdu)}"
+                    )
 
         if not pdu:
             raise ValueError("No UDS PDU bytes found after PCI extraction")
@@ -455,8 +473,15 @@ class UdsMessage:
             return bytes(pdu)
 
         pdu_len = len(pdu)
+        if pdu_len == 0:
+            raise ValueError("Cannot encode empty UDS Single Frame")
+        if pdu_len > 62:
+            raise ValueError(
+                f"UDS Single Frame payload length {pdu_len} exceeds maximum CAN-FD SF capacity (62 bytes)"
+            )
+
         if pdu_len > 7:
-            # CAN-FD Extended Single Frame
+            # CAN-FD Extended Single Frame (0x00 followed by 1 byte DL)
             out = bytearray([0x00, pdu_len]) + pdu
         else:
             # Classical CAN Single Frame (0x0N where N = length)
@@ -534,3 +559,52 @@ class DiagnosticFaultInjector:
             data=uds_msg.encode(add_pci=True),
             is_extended_id=is_extended_id,
         )
+
+
+def format_j1939_diagnostics(diag_msg: J1939DiagnosticMessage) -> Dict[str, Any]:
+    """Format J1939 DM1/DM2 diagnostic message into standard structured dictionary."""
+    return {
+        "diagnostic_type": "J1939_DM1" if diag_msg.is_dm1 else "J1939_DM2",
+        "lamp_status": {
+            "protect_lamp": diag_msg.lamp_state.protect_lamp.name,
+            "amber_warning_lamp": diag_msg.lamp_state.amber_warning_lamp.name,
+            "red_stop_lamp": diag_msg.lamp_state.red_stop_lamp.name,
+            "malfunction_indicator_lamp": diag_msg.lamp_state.malfunction_indicator_lamp.name,
+            "flash_protect": diag_msg.lamp_state.flash_protect.name,
+            "flash_amber": diag_msg.lamp_state.flash_amber.name,
+            "flash_red": diag_msg.lamp_state.flash_red.name,
+            "flash_mil": diag_msg.lamp_state.flash_mil.name,
+        },
+        "dtc_count": len(diag_msg.dtcs),
+        "dtcs": [
+            {
+                "spn": dtc.spn,
+                "fmi": dtc.fmi,
+                "fmi_description": dtc.fmi_description,
+                "cm": dtc.cm,
+                "occurrence_count": dtc.oc,
+            }
+            for dtc in diag_msg.dtcs
+        ],
+    }
+
+
+def format_uds_diagnostics(uds_msg: UdsMessage) -> Dict[str, Any]:
+    """Format ISO 14229 UDS message into standard structured dictionary."""
+    res: Dict[str, Any] = {
+        "service_id": f"0x{uds_msg.service_id:02X}",
+        "service_name": uds_msg.service_name,
+        "is_response": uds_msg.is_response,
+        "is_negative_response": uds_msg.is_negative_response,
+    }
+    if uds_msg.sub_function is not None:
+        res["sub_function"] = f"0x{uds_msg.sub_function:02X}"
+    if uds_msg.data_identifier is not None:
+        res["data_identifier"] = f"0x{uds_msg.data_identifier:04X}"
+    if uds_msg.nrc is not None:
+        res["nrc"] = uds_msg.nrc.name
+        res["nrc_code"] = f"0x{int(uds_msg.nrc):02X}"
+    if uds_msg.payload:
+        res["payload_hex"] = uds_msg.payload.hex().upper()
+    return res
+

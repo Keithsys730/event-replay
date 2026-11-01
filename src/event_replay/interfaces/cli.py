@@ -18,6 +18,8 @@ from event_replay.domain.diagnostics import (
     PGN_DM2_PREV_ACTIVE_DTC,
     J1939DiagnosticMessage,
     UdsMessage,
+    format_j1939_diagnostics,
+    format_uds_diagnostics,
 )
 from event_replay.domain.engine import ReplayEngine
 from event_replay.domain.models import (
@@ -223,47 +225,19 @@ def cmd_decode_can(args: argparse.Namespace) -> int:
                 pgn = (dp_edp << 16) | (pf << 8) | (ps if pf >= 240 else 0)
                 if pgn in (PGN_DM1_ACTIVE_DTC, PGN_DM2_PREV_ACTIVE_DTC):
                     diag_msg = J1939DiagnosticMessage.decode_payload(pgn, payload)
-                    decoded_dict["diagnostics"] = {
-                        "diagnostic_type": "J1939_DM1" if diag_msg.is_dm1 else "J1939_DM2",
-                        "lamp_status": {
-                            "protect_lamp": diag_msg.lamp_state.protect_lamp.name,
-                            "amber_warning_lamp": diag_msg.lamp_state.amber_warning_lamp.name,
-                            "red_stop_lamp": diag_msg.lamp_state.red_stop_lamp.name,
-                            "malfunction_indicator_lamp": diag_msg.lamp_state.malfunction_indicator_lamp.name,
-                        },
-                        "dtc_count": len(diag_msg.dtcs),
-                        "dtcs": [
-                            {
-                                "spn": d.spn,
-                                "fmi": d.fmi,
-                                "fmi_description": d.fmi_description,
-                                "cm": d.cm,
-                                "occurrence_count": d.oc,
-                            }
-                            for d in diag_msg.dtcs
-                        ],
-                    }
+                    decoded_dict["diagnostics"] = format_j1939_diagnostics(diag_msg)
                     if decoded_dict["message_name"] == "UNKNOWN":
                         decoded_dict["message_name"] = "DM1_ActiveDTC" if diag_msg.is_dm1 else "DM2_PrevActiveDTC"
 
-            # Check UDS
+            # Check UDS (11-bit standard diagnostic IDs or 29-bit PF=0xDA)
             is_uds = (
-                arb_id == 0x7DF
-                or arb_id in range(0x7E0, 0x7F0)
+                (not is_ext and (arb_id == 0x7DF or arb_id in range(0x7E0, 0x7F0)))
                 or (is_ext and ((arb_id >> 16) & 0xFF) == 0xDA)
             )
             if is_uds and len(payload) > 0:
                 try:
                     uds_msg = UdsMessage.decode(payload, has_pci=True)
-                    decoded_dict["uds"] = {
-                        "service_id": f"0x{uds_msg.service_id:02X}",
-                        "service_name": uds_msg.service_name,
-                        "is_response": uds_msg.is_response,
-                        "is_negative_response": uds_msg.is_negative_response,
-                        "sub_function": f"0x{uds_msg.sub_function:02X}" if uds_msg.sub_function is not None else None,
-                        "data_identifier": f"0x{uds_msg.data_identifier:04X}" if uds_msg.data_identifier is not None else None,
-                        "nrc": uds_msg.nrc.name if uds_msg.nrc is not None else None,
-                    }
+                    decoded_dict["uds"] = format_uds_diagnostics(uds_msg)
                     if decoded_dict["message_name"] == "UNKNOWN":
                         decoded_dict["message_name"] = f"UDS_{uds_msg.service_name}"
                 except Exception:

@@ -30,6 +30,8 @@ from event_replay.domain.diagnostics import (
     UdsSessionType,
     UdsMessage,
     DiagnosticFaultInjector,
+    format_j1939_diagnostics,
+    format_uds_diagnostics,
 )
 from event_replay.adapters.can_adapter import CanLogAdapter
 
@@ -64,5 +66,7 @@ __all__ = [
     "UdsSessionType",
     "UdsMessage",
     "DiagnosticFaultInjector",
+    "format_j1939_diagnostics",
+    "format_uds_diagnostics",
     "CanLogAdapter",
 ]

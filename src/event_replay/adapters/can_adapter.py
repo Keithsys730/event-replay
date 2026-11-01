@@ -14,56 +14,12 @@ from event_replay.domain.diagnostics import (
     PGN_DM2_PREV_ACTIVE_DTC,
     J1939DiagnosticMessage,
     UdsMessage,
+    format_j1939_diagnostics,
+    format_uds_diagnostics,
 )
 from event_replay.domain.j1939_tp import J1939TransportReassembler
 from event_replay.domain.models import RecordedEvent
 from event_replay.domain.stream import EventStream
-
-
-def _format_j1939_diagnostics(diag_msg: J1939DiagnosticMessage) -> Dict[str, Any]:
-    """Format J1939 DM1/DM2 diagnostic message into structured dictionary."""
-    return {
-        "diagnostic_type": "J1939_DM1" if diag_msg.is_dm1 else "J1939_DM2",
-        "lamp_status": {
-            "protect_lamp": diag_msg.lamp_state.protect_lamp.name,
-            "amber_warning_lamp": diag_msg.lamp_state.amber_warning_lamp.name,
-            "red_stop_lamp": diag_msg.lamp_state.red_stop_lamp.name,
-            "malfunction_indicator_lamp": diag_msg.lamp_state.malfunction_indicator_lamp.name,
-            "flash_mil": diag_msg.lamp_state.flash_mil.name,
-            "flash_red": diag_msg.lamp_state.flash_red.name,
-        },
-        "dtc_count": len(diag_msg.dtcs),
-        "dtcs": [
-            {
-                "spn": dtc.spn,
-                "fmi": dtc.fmi,
-                "fmi_description": dtc.fmi_description,
-                "cm": dtc.cm,
-                "occurrence_count": dtc.oc,
-            }
-            for dtc in diag_msg.dtcs
-        ],
-    }
-
-
-def _format_uds_diagnostics(uds_msg: UdsMessage) -> Dict[str, Any]:
-    """Format ISO 14229 UDS message into structured dictionary."""
-    res: Dict[str, Any] = {
-        "service_id": f"0x{uds_msg.service_id:02X}",
-        "service_name": uds_msg.service_name,
-        "is_response": uds_msg.is_response,
-        "is_negative_response": uds_msg.is_negative_response,
-    }
-    if uds_msg.sub_function is not None:
-        res["sub_function"] = f"0x{uds_msg.sub_function:02X}"
-    if uds_msg.data_identifier is not None:
-        res["data_identifier"] = f"0x{uds_msg.data_identifier:04X}"
-    if uds_msg.nrc is not None:
-        res["nrc"] = uds_msg.nrc.name
-        res["nrc_code"] = f"0x{int(uds_msg.nrc):02X}"
-    if uds_msg.payload:
-        res["payload_hex"] = uds_msg.payload.hex().upper()
-    return res
 
 
 class CanLogAdapter:
@@ -159,7 +115,7 @@ class CanLogAdapter:
                             # Diagnostic inspection for reassembled J1939 messages (e.g. multi-packet DM1/DM2)
                             if decode_diagnostics and reassembled_msg.pgn in (PGN_DM1_ACTIVE_DTC, PGN_DM2_PREV_ACTIVE_DTC):
                                 diag_msg = J1939DiagnosticMessage.decode_payload(reassembled_msg.pgn, reassembled_msg.data)
-                                rec["diagnostics"] = _format_j1939_diagnostics(diag_msg)
+                                rec["diagnostics"] = format_j1939_diagnostics(diag_msg)
                                 if rec["message_name"] == "UNKNOWN":
                                     rec["message_name"] = "DM1_ActiveDTC" if diag_msg.is_dm1 else "DM2_PrevActiveDTC"
 
@@ -193,23 +149,22 @@ class CanLogAdapter:
                         pgn = (dp_edp << 16) | (pf << 8) | (ps if pf >= 240 else 0)
                         if pgn in (PGN_DM1_ACTIVE_DTC, PGN_DM2_PREV_ACTIVE_DTC):
                             diag_msg = J1939DiagnosticMessage.decode_payload(pgn, frame.data)
-                            rec["diagnostics"] = _format_j1939_diagnostics(diag_msg)
+                            rec["diagnostics"] = format_j1939_diagnostics(diag_msg)
                             rec["pgn"] = f"0x{pgn:04X}"
                             if rec["message_name"] == "UNKNOWN":
                                 rec["message_name"] = "DM1_ActiveDTC" if diag_msg.is_dm1 else "DM2_PrevActiveDTC"
 
-                    # 2. Check for ISO 14229 UDS frame
-                    # 11-bit diagnostic range (0x7DF broadcast, 0x7E0..0x7EF physical request/response)
+                    # 2. Check for ISO 14229 UDS frame:
+                    # 11-bit standard diagnostic range (0x7DF broadcast, 0x7E0..0x7EF physical request/response)
                     # or 29-bit ISO 15765-2 / J1939-73 UDS (PF=0xDA)
                     is_uds_id = (
-                        frame.arbitration_id == 0x7DF
-                        or frame.arbitration_id in range(0x7E0, 0x7F0)
+                        (not frame.is_extended_id and (frame.arbitration_id == 0x7DF or frame.arbitration_id in range(0x7E0, 0x7F0)))
                         or (frame.is_extended_id and ((frame.arbitration_id >> 16) & 0xFF) == 0xDA)
                     )
                     if is_uds_id and len(frame.data) > 0:
                         try:
                             uds_msg = UdsMessage.decode(frame.data, has_pci=True)
-                            rec["uds"] = _format_uds_diagnostics(uds_msg)
+                            rec["uds"] = format_uds_diagnostics(uds_msg)
                             if rec["message_name"] == "UNKNOWN":
                                 rec["message_name"] = f"UDS_{uds_msg.service_name}"
                         except Exception:
