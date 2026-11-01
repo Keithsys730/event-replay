@@ -64,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_decode.add_argument("--log", type=Path, default=None, help="Path to candump/CAN log file to decode")
     p_decode.add_argument("--can-id", type=str, default="", help="Single CAN arbitration ID in hex (e.g. 0x18F00400)")
     p_decode.add_argument("--payload", type=str, default="", help="Single CAN hex payload (e.g. 0102030405060708)")
+    p_decode.add_argument("--no-tp", action="store_true", help="Disable SAE J1939 Transport Protocol multi-packet reassembly")
     p_decode.add_argument("--out", type=Path, default=None, help="Output JSON file path")
 
     return parser
@@ -200,7 +201,7 @@ def cmd_decode_can(args: argparse.Namespace) -> int:
             print(f"[ERROR] Log file not found: {args.log}", file=sys.stderr)
             return 1
         stream = CanLogAdapter.parse_log_file(args.log)
-        output_data = CanLogAdapter.decode_stream(stream, dbc)
+        output_data = CanLogAdapter.decode_stream(stream, dbc, reassemble_tp=not args.no_tp)
     else:
         print("[ERROR] Must provide either --log <file> or both --can-id <id> and --payload <hex>", file=sys.stderr)
         return 1
