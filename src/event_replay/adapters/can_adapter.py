@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
@@ -28,12 +29,17 @@ class CanLogAdapter:
 
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
-                frame = CanFdFrame.from_candump_line(line)
+                try:
+                    frame = CanFdFrame.from_candump_line(line)
+                except (ValueError, IndexError):
+                    continue
+
                 if frame is not None:
-                    # Construct an ISO timestamp from microsecond timestamp if present
+                    # Construct an ISO timestamp from microsecond epoch timestamp if present
                     if frame.timestamp_us > 0:
-                        sec = frame.timestamp_us / 1e6
-                        iso_ts = f"2026-11-01T00:00:{sec:06.3f}Z"
+                        sec_epoch = frame.timestamp_us / 1e6
+                        dt = datetime.fromtimestamp(sec_epoch, tz=timezone.utc)
+                        iso_ts = dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                     else:
                         iso_ts = "2026-11-01T00:00:00.000000Z"
 
@@ -58,7 +64,7 @@ class CanLogAdapter:
         for event in stream.events:
             try:
                 frame = CanFdFrame.from_recorded_event(event)
-                decoded = dbc.decode_frame(frame.arbitration_id, frame.data)
+                decoded = dbc.decode_frame(frame.arbitration_id, frame.data, is_extended_id=frame.is_extended_id)
                 if decoded is not None:
                     decoded_records.append({
                         "seq_id": event.seq_id,

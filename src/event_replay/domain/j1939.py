@@ -61,12 +61,12 @@ class J1939Header:
             # PDU1 (0..239): PDU Specific is Destination Address (DA)
             # PGN has the lower byte masked to 0x00
             destination_address: Optional[int] = ps
-            pgn = (dp << 16) | (pf << 8)
+            pgn = (edp << 17) | (dp << 16) | (pf << 8)
         else:
             # PDU2 (240..255): PDU Specific is Group Extension (GE)
             # Broadcast message; PGN incorporates PS
             destination_address = None
-            pgn = (dp << 16) | (pf << 8) | ps
+            pgn = (edp << 17) | (dp << 16) | (pf << 8) | ps
 
         return cls(
             priority=priority,
@@ -102,6 +102,7 @@ class J1939Header:
         destination_address: Optional[int] = None,
     ) -> J1939Header:
         """Construct a J1939Header given PGN, SA, priority and optional destination."""
+        edp = (pgn >> 17) & 0x01
         dp = (pgn >> 16) & 0x01
         pf = (pgn >> 8) & 0xFF
         ps_low = pgn & 0xFF
@@ -116,7 +117,7 @@ class J1939Header:
 
         return cls(
             priority=priority,
-            edp=0,
+            edp=edp,
             dp=dp,
             pdu_format=pf,
             pdu_specific=pdu_specific,

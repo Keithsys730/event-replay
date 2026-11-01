@@ -115,33 +115,47 @@ class DbcDatabase:
 
         # If message has an extended 29-bit ID, index by SAE J1939 PGN as well
         if message.is_extended_id or message.message_id > 0x7FF:
-            # Extract PGN: bits 24..8
+            # Extract 18-bit PGN: EDP (bit 25), DP (bit 24), PF (bits 23..16), PS (bits 15..8)
+            edp = (message.message_id >> 25) & 0x01
             dp = (message.message_id >> 24) & 0x01
             pf = (message.message_id >> 16) & 0xFF
             ps = (message.message_id >> 8) & 0xFF
-            pgn = (dp << 16) | (pf << 8) if pf < 240 else (dp << 16) | (pf << 8) | ps
+            pgn = (edp << 17) | (dp << 16) | (pf << 8) if pf < 240 else (edp << 17) | (dp << 16) | (pf << 8) | ps
             self.messages_by_pgn[pgn] = message
 
-    def find_message(self, arbitration_id: int) -> Optional[DbcMessage]:
+    def find_message(
+        self,
+        arbitration_id: int,
+        is_extended_id: Optional[bool] = None,
+    ) -> Optional[DbcMessage]:
         """Lookup message by exact CAN arbitration ID or SAE J1939 PGN."""
         # 1. Exact ID match
         if arbitration_id in self.messages_by_id:
-            return self.messages_by_id[arbitration_id]
+            msg = self.messages_by_id[arbitration_id]
+            if is_extended_id is None or msg.is_extended_id == is_extended_id:
+                return msg
 
-        # 2. J1939 PGN lookup (for 29-bit IDs)
-        if arbitration_id > 0x7FF:
+        # 2. J1939 PGN lookup (handles priority 0 and low CAN IDs)
+        should_check_pgn = (is_extended_id is not False)
+        if should_check_pgn:
+            edp = (arbitration_id >> 25) & 0x01
             dp = (arbitration_id >> 24) & 0x01
             pf = (arbitration_id >> 16) & 0xFF
             ps = (arbitration_id >> 8) & 0xFF
-            pgn = (dp << 16) | (pf << 8) if pf < 240 else (dp << 16) | (pf << 8) | ps
+            pgn = (edp << 17) | (dp << 16) | (pf << 8) if pf < 240 else (edp << 17) | (dp << 16) | (pf << 8) | ps
             if pgn in self.messages_by_pgn:
                 return self.messages_by_pgn[pgn]
 
         return None
 
-    def decode_frame(self, arbitration_id: int, payload: bytes) -> Optional[Dict[str, Any]]:
+    def decode_frame(
+        self,
+        arbitration_id: int,
+        payload: bytes,
+        is_extended_id: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Decode a raw CAN frame's payload into structured physical signals."""
-        msg = self.find_message(arbitration_id)
+        msg = self.find_message(arbitration_id, is_extended_id=is_extended_id)
         if not msg:
             return None
         return {

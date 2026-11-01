@@ -265,3 +265,93 @@ def test_can_log_adapter_and_cli_decode_command(tmp_path: Path):
     assert records[1]["message_name"] == "BMS_PackStatus"
     assert records[1]["signals"]["BMS_PackVoltage"] == 500.0  # 0x1388 = 5000 * 0.1
     assert records[1]["signals"]["BMS_StateOfCharge"] == 50.0 # 0x64 = 100 * 0.5
+
+
+def test_j1939_priority_0_low_id_decoding():
+    """Verify J1939 Priority 0 frames with CAN ID <= 0x7FF decode properly (P0)."""
+    dbc = DbcDatabase()
+    msg = DbcMessage(message_id=0x0C000000, name="TSC1", dlc=8, is_extended_id=True)
+    msg.add_signal(DbcSignal(name="OverrideControlMode", start_bit=0, length=2, is_little_endian=True, is_signed=False))
+    dbc.add_message(msg)
+
+    # Priority 0, EDP=0, DP=0, PF=0, DA=0x00, SA=0x03 -> CAN ID = 0x00000003 <= 0x7FF
+    can_id = 0x00000003
+    decoded = dbc.decode_frame(can_id, bytes([0x01] * 8), is_extended_id=True)
+    assert decoded is not None
+    assert decoded["message_name"] == "TSC1"
+    assert decoded["signals"]["OverrideControlMode"] == 1
+
+
+def test_j1939_extended_data_page_edp_preservation():
+    """Verify EDP (bit 25 / bit 17) is preserved in PGN and CAN ID reconstruction (P1)."""
+    pgn_edp = 0x2EF00
+    hdr = J1939Header.build(pgn=pgn_edp, source_address=0x10)
+    can_id = hdr.to_can_id()
+    parsed = J1939Header.parse_can_id(can_id)
+    assert parsed.pgn == pgn_edp
+    assert parsed.edp == 1
+
+
+def test_candump_verbose_8_digit_hex_extended_flag():
+    """Verify candump verbose format with 8-character hex ID is marked as extended (P1)."""
+    frame = CanFdFrame.from_candump_line("can0 00000123 [8] 01 02 03 04 05 06 07 08")
+    assert frame is not None
+    assert frame.is_extended_id is True
+    # Verify J1939 accepts it as 29-bit
+    j1939_msg = J1939Message.from_can_frame(frame)
+    assert j1939_msg.header.source_address == 0x23
+
+
+def test_can_log_adapter_valid_iso8601_timestamps(tmp_path: Path):
+    """Verify candump epoch timestamps generate valid ISO-8601 strings (P1)."""
+    from datetime import datetime
+    log_file = tmp_path / "candump_epoch.log"
+    log_file.write_text("(1730456100.100000) can0 18FE57FE#A00F550002020000\n", encoding="utf-8")
+
+    stream = CanLogAdapter.parse_log_file(log_file)
+    assert stream.count == 1
+    ev = stream.events[0]
+    dt = datetime.fromisoformat(ev.timestamp_utc)
+    assert dt.year == 2024 or dt.year == 2026
+
+
+def test_can_frame_recorded_event_uppercase_0x_header():
+    """Verify 0X uppercase hex prefix in recorded event headers parses cleanly (P2)."""
+    from event_replay.domain.models import RecordedEvent
+    ev = RecordedEvent.create(
+        seq_id=1,
+        event_id="test-1",
+        stream_topic="can",
+        timestamp_utc="2026-11-01T00:00:00Z",
+        payload=bytes([1, 2, 3]),
+        headers={"can_id": "0X123", "is_extended": "false"},
+    )
+    frame = CanFdFrame.from_recorded_event(ev)
+    assert frame.arbitration_id == 0x123
+
+
+def test_cli_decode_can_empty_payload(tmp_path: Path):
+    """Verify CLI decode-can accepts empty payload (P2)."""
+    dbc_file = tmp_path / "zero_dlc.dbc"
+    dbc_file.write_text("BO_ 256 Heartbeat: 0 VCU\n", encoding="utf-8")
+    ret = main([
+        "decode-can",
+        "--dbc", str(dbc_file),
+        "--can-id", "0x100",
+        "--payload", "",
+    ])
+    assert ret == 0
+
+
+def test_can_log_adapter_skips_corrupted_lines(tmp_path: Path):
+    """Verify CanLogAdapter gracefully skips invalid or corrupted lines (P2)."""
+    log_file = tmp_path / "corrupted.log"
+    log_file.write_text(
+        "INVALID LINE\n"
+        "can0 123#DEADBEEF\n"
+        "can0 456#ODD_HEX_123\n"
+        "can0 789#0102\n",
+        encoding="utf-8",
+    )
+    stream = CanLogAdapter.parse_log_file(log_file)
+    assert stream.count == 2

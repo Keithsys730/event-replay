@@ -113,8 +113,11 @@ class CanFdFrame:
     def from_recorded_event(cls, event: RecordedEvent) -> CanFdFrame:
         """Reconstruct a CanFdFrame from a RecordedEvent."""
         hdrs = event.headers
-        raw_id_str = hdrs.get("can_id", "0x000")
-        arb_id = int(raw_id_str, 16) if raw_id_str.startswith("0x") else int(raw_id_str)
+        raw_id_str = hdrs.get("can_id", "0x000").strip()
+        try:
+            arb_id = int(raw_id_str, 0)
+        except ValueError:
+            arb_id = int(raw_id_str, 16)
         is_ext = hdrs.get("is_extended", "false").lower() == "true" or arb_id > 0x7FF
         is_fd = hdrs.get("is_fd", "false").lower() == "true" or len(event.payload) > 8
         brs = hdrs.get("brs", "false").lower() == "true"
@@ -197,8 +200,9 @@ class CanFdFrame:
         verbose_match = re.match(r"^(\w+)\s+([0-9a-fA-F]+)\s+\[(\d+)\]\s*(.*)$", clean)
         if verbose_match:
             channel = verbose_match.group(1)
-            arb_id = int(verbose_match.group(2), 16)
-            is_ext = arb_id > 0x7FF
+            arb_id_hex = verbose_match.group(2)
+            arb_id = int(arb_id_hex, 16)
+            is_ext = len(arb_id_hex) > 3 or arb_id > 0x7FF
             hex_tokens = verbose_match.group(4).split()
             data = bytes(int(b, 16) for b in hex_tokens)
             is_fd = len(data) > 8

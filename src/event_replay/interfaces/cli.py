@@ -181,10 +181,16 @@ def cmd_decode_can(args: argparse.Namespace) -> int:
 
     dbc = DbcDatabase.from_file(args.dbc)
 
-    if args.can_id and args.payload:
-        arb_id = int(args.can_id, 16) if args.can_id.startswith("0x") or args.can_id.startswith("0X") else int(args.can_id)
+    if args.can_id is not None and args.can_id != "" and args.payload is not None:
+        clean_id_str = args.can_id.strip()
+        try:
+            arb_id = int(clean_id_str, 0)
+        except ValueError:
+            arb_id = int(clean_id_str, 16)
         payload = bytes.fromhex(args.payload)
-        decoded = dbc.decode_frame(arb_id, payload)
+        hex_digits = clean_id_str.lower().replace("0x", "")
+        is_ext = len(hex_digits) > 3 or arb_id > 0x7FF
+        decoded = dbc.decode_frame(arb_id, payload, is_extended_id=is_ext)
         if decoded is None:
             print(f"[WARN] No matching DBC message found for ID 0x{arb_id:X}", file=sys.stderr)
             return 1
