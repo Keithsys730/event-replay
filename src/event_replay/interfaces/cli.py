@@ -6,13 +6,19 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from event_replay.adapters.dry_run_sink import DryRunSink
 from event_replay.adapters.can_adapter import CanLogAdapter
 from event_replay.domain.bisect import bisect_failing_event
 from event_replay.domain.dbc import DbcDatabase
 from event_replay.domain.differ import StreamDiffer
+from event_replay.domain.diagnostics import (
+    PGN_DM1_ACTIVE_DTC,
+    PGN_DM2_PREV_ACTIVE_DTC,
+    J1939DiagnosticMessage,
+    UdsMessage,
+)
 from event_replay.domain.engine import ReplayEngine
 from event_replay.domain.models import (
     ReplayClockMode,
@@ -59,12 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_bisect.add_argument("--failing-keyword", required=True, type=str, help="Substring triggering failure")
 
     # Subcommand: decode-can
-    p_decode = subparsers.add_parser("decode-can", help="Decode CAN/CAN-FD/J1939 frames against a DBC database")
-    p_decode.add_argument("--dbc", required=True, type=Path, help="Path to .dbc database file")
+    p_decode = subparsers.add_parser("decode-can", help="Decode CAN/CAN-FD/J1939 frames against a DBC database and diagnostics")
+    p_decode.add_argument("--dbc", default=None, type=Path, help="Path to .dbc database file (optional)")
     p_decode.add_argument("--log", type=Path, default=None, help="Path to candump/CAN log file to decode")
     p_decode.add_argument("--can-id", type=str, default="", help="Single CAN arbitration ID in hex (e.g. 0x18F00400)")
     p_decode.add_argument("--payload", type=str, default="", help="Single CAN hex payload (e.g. 0102030405060708)")
     p_decode.add_argument("--no-tp", action="store_true", help="Disable SAE J1939 Transport Protocol multi-packet reassembly")
+    p_decode.add_argument("--no-diag", action="store_true", help="Disable automotive diagnostic decoding (DM1/DM2, UDS)")
     p_decode.add_argument("--out", type=Path, default=None, help="Output JSON file path")
 
     return parser
@@ -176,11 +183,14 @@ def cmd_bisect(args: argparse.Namespace) -> int:
 
 
 def cmd_decode_can(args: argparse.Namespace) -> int:
-    if not args.dbc.exists():
-        print(f"[ERROR] DBC file not found: {args.dbc}", file=sys.stderr)
-        return 1
+    dbc: Optional[DbcDatabase] = None
+    if args.dbc is not None:
+        if not args.dbc.exists():
+            print(f"[ERROR] DBC file not found: {args.dbc}", file=sys.stderr)
+            return 1
+        dbc = DbcDatabase.from_file(args.dbc)
 
-    dbc = DbcDatabase.from_file(args.dbc)
+    output_data: Any = None
 
     if args.can_id is not None and args.can_id != "" and args.payload is not None:
         clean_id_str = args.can_id.strip()
@@ -191,17 +201,90 @@ def cmd_decode_can(args: argparse.Namespace) -> int:
         payload = bytes.fromhex(args.payload)
         hex_digits = clean_id_str.lower().replace("0x", "")
         is_ext = len(hex_digits) > 3 or arb_id > 0x7FF
-        decoded = dbc.decode_frame(arb_id, payload, is_extended_id=is_ext)
-        if decoded is None:
+
+        decoded_dict: Dict[str, Any] = {
+            "can_id": f"0x{arb_id:X}",
+            "raw_hex": args.payload.upper(),
+            "message_name": "UNKNOWN",
+        }
+
+        if dbc is not None:
+            decoded = dbc.decode_frame(arb_id, payload, is_extended_id=is_ext)
+            if decoded is not None:
+                decoded_dict["message_name"] = decoded["message_name"]
+                decoded_dict["signals"] = decoded["signals"]
+
+        if not args.no_diag:
+            # Check J1939 DM1/DM2
+            if is_ext or arb_id > 0x7FF:
+                dp_edp = (arb_id >> 24) & 0x03
+                pf = (arb_id >> 16) & 0xFF
+                ps = (arb_id >> 8) & 0xFF
+                pgn = (dp_edp << 16) | (pf << 8) | (ps if pf >= 240 else 0)
+                if pgn in (PGN_DM1_ACTIVE_DTC, PGN_DM2_PREV_ACTIVE_DTC):
+                    diag_msg = J1939DiagnosticMessage.decode_payload(pgn, payload)
+                    decoded_dict["diagnostics"] = {
+                        "diagnostic_type": "J1939_DM1" if diag_msg.is_dm1 else "J1939_DM2",
+                        "lamp_status": {
+                            "protect_lamp": diag_msg.lamp_state.protect_lamp.name,
+                            "amber_warning_lamp": diag_msg.lamp_state.amber_warning_lamp.name,
+                            "red_stop_lamp": diag_msg.lamp_state.red_stop_lamp.name,
+                            "malfunction_indicator_lamp": diag_msg.lamp_state.malfunction_indicator_lamp.name,
+                        },
+                        "dtc_count": len(diag_msg.dtcs),
+                        "dtcs": [
+                            {
+                                "spn": d.spn,
+                                "fmi": d.fmi,
+                                "fmi_description": d.fmi_description,
+                                "cm": d.cm,
+                                "occurrence_count": d.oc,
+                            }
+                            for d in diag_msg.dtcs
+                        ],
+                    }
+                    if decoded_dict["message_name"] == "UNKNOWN":
+                        decoded_dict["message_name"] = "DM1_ActiveDTC" if diag_msg.is_dm1 else "DM2_PrevActiveDTC"
+
+            # Check UDS
+            is_uds = (
+                arb_id == 0x7DF
+                or arb_id in range(0x7E0, 0x7F0)
+                or (is_ext and ((arb_id >> 16) & 0xFF) == 0xDA)
+            )
+            if is_uds and len(payload) > 0:
+                try:
+                    uds_msg = UdsMessage.decode(payload, has_pci=True)
+                    decoded_dict["uds"] = {
+                        "service_id": f"0x{uds_msg.service_id:02X}",
+                        "service_name": uds_msg.service_name,
+                        "is_response": uds_msg.is_response,
+                        "is_negative_response": uds_msg.is_negative_response,
+                        "sub_function": f"0x{uds_msg.sub_function:02X}" if uds_msg.sub_function is not None else None,
+                        "data_identifier": f"0x{uds_msg.data_identifier:04X}" if uds_msg.data_identifier is not None else None,
+                        "nrc": uds_msg.nrc.name if uds_msg.nrc is not None else None,
+                    }
+                    if decoded_dict["message_name"] == "UNKNOWN":
+                        decoded_dict["message_name"] = f"UDS_{uds_msg.service_name}"
+                except Exception:
+                    pass
+
+        if dbc is not None and decoded_dict["message_name"] == "UNKNOWN" and "diagnostics" not in decoded_dict and "uds" not in decoded_dict:
             print(f"[WARN] No matching DBC message found for ID 0x{arb_id:X}", file=sys.stderr)
             return 1
-        output_data = decoded
+
+        output_data = decoded_dict
     elif args.log:
         if not args.log.exists():
             print(f"[ERROR] Log file not found: {args.log}", file=sys.stderr)
             return 1
         stream = CanLogAdapter.parse_log_file(args.log)
-        output_data = CanLogAdapter.decode_stream(stream, dbc, reassemble_tp=not args.no_tp)
+        output_data = CanLogAdapter.decode_stream(
+            stream,
+            dbc=dbc,
+            reassemble_tp=not args.no_tp,
+            decode_diagnostics=not args.no_diag,
+        )
     else:
         print("[ERROR] Must provide either --log <file> or both --can-id <id> and --payload <hex>", file=sys.stderr)
         return 1
