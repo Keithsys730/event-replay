@@ -27,6 +27,13 @@ from event_replay.domain.models import (
     ReplayConfig,
 )
 from event_replay.domain.stream import EventStream
+from event_replay.domain.stress_generator import (
+    ObcStressScenarioConfig,
+    generate_obc_stress_stream,
+    export_stress_stream_to_candump,
+    export_stress_stream_to_event_replay_jsonl,
+    SPN_OBC_DCLINK_OVP,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,6 +82,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_decode.add_argument("--no-tp", action="store_true", help="Disable SAE J1939 Transport Protocol multi-packet reassembly")
     p_decode.add_argument("--no-diag", action="store_true", help="Disable automotive diagnostic decoding (DM1/DM2, UDS)")
     p_decode.add_argument("--out", type=Path, default=None, help="Output JSON file path")
+
+    # Subcommand: generate-obc-stress
+    p_stress = subparsers.add_parser("generate-obc-stress", help="Synthesize realistic OBC CAN/CAN-FD stress traffic with optional fault injection")
+    p_stress.add_argument("--duration-ms", type=float, default=100.0, help="Total scenario duration in milliseconds (default: 100.0)")
+    p_stress.add_argument("--telemetry-ms", type=float, default=1.0, help="CAN-FD telemetry broadcast interval in ms (default: 1.0)")
+    p_stress.add_argument("--status-ms", type=float, default=10.0, help="J1939 OBC status broadcast interval in ms (default: 10.0)")
+    p_stress.add_argument("--iso15118-ms", type=float, default=5.0, help="ISO 15118 EVCC broadcast interval in ms (default: 5.0)")
+    p_stress.add_argument("--uds-ms", type=float, default=20.0, help="UDS periodic poll interval in ms (default: 20.0)")
+    p_stress.add_argument("--fault-ms", type=float, default=None, help="Microsecond-precise fault injection time in ms (e.g. 50.0)")
+    p_stress.add_argument("--fault-spn", type=int, default=SPN_OBC_DCLINK_OVP, help=f"J1939 DM1 Fault SPN (default: {SPN_OBC_DCLINK_OVP})")
+    p_stress.add_argument("--fault-fmi", type=int, default=3, help="J1939 DM1 Fault FMI (default: 3)")
+    p_stress.add_argument("--no-can-fd", action="store_true", help="Disable CAN-FD fast telemetry and fallback to 8-byte frames")
+    p_stress.add_argument("--channel", type=str, default="can0", help="CAN channel name (default: can0)")
+    p_stress.add_argument("--out-candump", type=Path, default=None, help="Path to write standard SocketCAN .candump log")
+    p_stress.add_argument("--out-jsonl", type=Path, default=None, help="Path to write event-replay JSONL stream")
 
     return parser
 
@@ -273,6 +295,55 @@ def cmd_decode_can(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate_obc_stress(args: argparse.Namespace) -> int:
+    config = ObcStressScenarioConfig(
+        duration_ms=args.duration_ms,
+        telemetry_interval_ms=args.telemetry_ms,
+        status_interval_ms=args.status_ms,
+        iso15118_interval_ms=args.iso15118_ms,
+        uds_poll_interval_ms=args.uds_ms,
+        channel=args.channel,
+        enable_can_fd=not args.no_can_fd,
+        fault_injection_time_ms=args.fault_ms,
+        fault_spn=args.fault_spn,
+        fault_fmi=args.fault_fmi,
+    )
+    frames = generate_obc_stress_stream(config)
+
+    telem_count = sum(1 for f in frames if (f.arbitration_id >> 8) & 0x3FFFF == 0x00FF51)
+    status_count = sum(1 for f in frames if (f.arbitration_id >> 8) & 0x3FFFF == 0x00FF50)
+    iso_count = sum(1 for f in frames if (f.arbitration_id >> 8) & 0x3FFFF == 0x00FF60)
+    uds_count = sum(1 for f in frames if f.arbitration_id == 0x7DF)
+    fault_count = sum(1 for f in frames if (f.arbitration_id >> 8) & 0x3FFFF == PGN_DM1_ACTIVE_DTC)
+
+    summary: Dict[str, Any] = {
+        "status": "success",
+        "scenario_duration_ms": args.duration_ms,
+        "total_frames_generated": len(frames),
+        "protocol_breakdown": {
+            "can_fd_telemetry": telem_count,
+            "j1939_obc_status": status_count,
+            "iso15118_evcc": iso_count,
+            "uds_queries": uds_count,
+            "j1939_dm1_faults": fault_count,
+        },
+        "fault_injected": config.fault_injection_time_ms is not None,
+    }
+
+    if args.out_candump:
+        lines = export_stress_stream_to_candump(frames, args.out_candump)
+        summary["out_candump"] = str(args.out_candump)
+        summary["candump_lines"] = lines
+
+    if args.out_jsonl:
+        events = export_stress_stream_to_event_replay_jsonl(frames, args.out_jsonl)
+        summary["out_jsonl"] = str(args.out_jsonl)
+        summary["jsonl_events"] = events
+
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -287,6 +358,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_bisect(args)
     elif args.subcommand == "decode-can":
         return cmd_decode_can(args)
+    elif args.subcommand == "generate-obc-stress":
+        return cmd_generate_obc_stress(args)
     return 1
 
 
