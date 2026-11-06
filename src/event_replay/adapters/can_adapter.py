@@ -62,6 +62,29 @@ class CanLogAdapter:
         return stream
 
     @classmethod
+    def load_can_frames_from_path(
+        cls,
+        file_path: Union[str, Path],
+    ) -> List[CanFdFrame]:
+        """Load CanFdFrames from either a SocketCAN candump file or an event-replay JSONL stream."""
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        if path.suffix.lower() == ".jsonl":
+            stream = EventStream.from_jsonl(path)
+            frames: List[CanFdFrame] = []
+            for ev in stream.events:
+                try:
+                    frames.append(CanFdFrame.from_recorded_event(ev))
+                except Exception:
+                    continue
+            return frames
+
+        stream = cls.parse_log_file(path)
+        return [CanFdFrame.from_recorded_event(ev) for ev in stream.events]
+
+    @classmethod
     def decode_stream(
         cls,
         stream: EventStream,
