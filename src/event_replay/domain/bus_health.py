@@ -207,7 +207,7 @@ class CanBusHealthAnalyzer:
         self.step_ms = max(1.0, step_ms)
         self.overload_threshold_pct = overload_threshold_pct
         self.jitter_threshold_pct = jitter_threshold_pct
-        self.min_periodic_count = min_periodic_count
+        self.min_periodic_count = max(2, min_periodic_count)
         self.babbling_utilization_threshold_pct = babbling_utilization_threshold_pct
 
     def analyze_frames(self, frames: Sequence[CanFdFrame]) -> BusHealthReport:
