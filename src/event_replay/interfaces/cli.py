@@ -27,6 +27,7 @@ from event_replay.domain.models import (
     ReplayConfig,
 )
 from event_replay.domain.stream import EventStream
+from event_replay.domain.bus_health import CanBusHealthAnalyzer
 from event_replay.domain.stress_generator import (
     ObcStressScenarioConfig,
     generate_obc_stress_stream,
@@ -97,6 +98,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_stress.add_argument("--channel", type=str, default="can0", help="CAN channel name (default: can0)")
     p_stress.add_argument("--out-candump", type=Path, default=None, help="Path to write standard SocketCAN .candump log")
     p_stress.add_argument("--out-jsonl", type=Path, default=None, help="Path to write event-replay JSONL stream")
+
+    # Subcommand: analyze-bus-health
+    p_health = subparsers.add_parser("analyze-bus-health", help="Analyze real-time sliding-window CAN bus load, jitter, and sporadic flooding")
+    p_health.add_argument("log_path", type=Path, help="Path to SocketCAN .candump log or event-replay .jsonl stream")
+    p_health.add_argument("--baudrate", type=int, default=500000, help="Nominal arbitration baudrate in bps (default: 500000)")
+    p_health.add_argument("--data-baudrate", type=int, default=2000000, help="CAN-FD data phase baudrate in bps (default: 2000000)")
+    p_health.add_argument("--window-ms", type=float, default=100.0, help="Sliding window duration in ms (default: 100.0)")
+    p_health.add_argument("--step-ms", type=float, default=20.0, help="Sliding window step interval in ms (default: 20.0)")
+    p_health.add_argument("--overload-threshold", type=float, default=80.0, help="Bus overload alarm threshold percentage (default: 80.0)")
+    p_health.add_argument("--jitter-threshold-pct", type=float, default=25.0, help="Periodic timing jitter alarm threshold percentage (default: 25.0)")
+    p_health.add_argument("--out", type=Path, default=None, help="Optional output JSON path for the health report")
 
     return parser
 
@@ -344,6 +356,31 @@ def cmd_generate_obc_stress(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze_bus_health(args: argparse.Namespace) -> int:
+    frames = CanLogAdapter.load_can_frames_from_path(args.log_path)
+    if not frames:
+        print(f"No CAN frames found in {args.log_path}")
+        return 1
+
+    analyzer = CanBusHealthAnalyzer(
+        nominal_baudrate=args.baudrate,
+        data_baudrate=args.data_baudrate,
+        window_ms=args.window_ms,
+        step_ms=args.step_ms,
+        overload_threshold_pct=args.overload_threshold,
+        jitter_threshold_pct=args.jitter_threshold_pct,
+    )
+    report = analyzer.analyze_frames(frames)
+    report_dict = report.to_dict()
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(report_dict, f, indent=2, ensure_ascii=False)
+
+    print(json.dumps(report_dict, indent=2, ensure_ascii=False))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -360,6 +397,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_decode_can(args)
     elif args.subcommand == "generate-obc-stress":
         return cmd_generate_obc_stress(args)
+    elif args.subcommand == "analyze-bus-health":
+        return cmd_analyze_bus_health(args)
     return 1
 
 
