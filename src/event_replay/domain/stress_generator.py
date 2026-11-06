@@ -11,6 +11,7 @@ Synthesizes high-frequency, multi-protocol automotive bus traffic:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import math
 from pathlib import Path
 import struct
@@ -70,11 +71,18 @@ class ObcStressScenarioConfig:
     def __post_init__(self) -> None:
         if self.duration_ms <= 0.0:
             raise ValueError("duration_ms must be strictly positive")
-        if self.telemetry_interval_ms <= 0.0 or self.status_interval_ms <= 0.0:
+        if (
+            self.telemetry_interval_ms <= 0.0
+            or self.status_interval_ms <= 0.0
+            or self.iso15118_interval_ms <= 0.0
+            or self.uds_poll_interval_ms <= 0.0
+        ):
             raise ValueError("Intervals must be strictly positive")
         if self.fault_injection_time_ms is not None:
             if not (0.0 <= self.fault_injection_time_ms <= self.duration_ms):
                 raise ValueError("fault_injection_time_ms must be within [0.0, duration_ms]")
+        if not (0 <= self.fault_fmi <= 31):
+            raise ValueError("fault_fmi must be within [0, 31]")
 
 
 def encode_j1939_can_id(priority: int, pgn: int, sa: int) -> int:
@@ -203,105 +211,107 @@ def generate_obc_stress_stream(config: ObcStressScenarioConfig) -> List[CanFdFra
     iso15118_us = int(round(config.iso15118_interval_ms * 1000.0))
     uds_us = int(round(config.uds_poll_interval_ms * 1000.0))
 
-    fault_injected = False
-    fault_target_us = (
-        int(round(config.fault_injection_time_ms * 1000.0))
-        if config.fault_injection_time_ms is not None
-        else -1
-    )
-
-    t_curr = 0
-    step_delta_us = min(telemetry_us, status_us, iso15118_us, uds_us, 1000)
-
-    while t_curr <= total_us:
-        # Check if fault should be injected at this timestamp
-        if not fault_injected and fault_target_us >= 0 and t_curr >= fault_target_us:
-            spn = config.fault_spn or SPN_OBC_DCLINK_OVP
-            fault_frame = synthesize_j1939_dm1_fault_frame(
-                spn=spn,
-                fmi=config.fault_fmi,
-                sa=CAN_SA_OBC,
-                timestamp_us=t_curr,
-                channel=config.channel,
-            )
-            frames.append(fault_frame)
-            fault_injected = True
-
-        # 1. Telemetry frames (CAN-FD)
-        if t_curr % telemetry_us == 0:
-            telem_id = encode_j1939_can_id(priority=6, pgn=PGN_OBC_TELEMETRY, sa=CAN_SA_OBC)
+    # 1. Telemetry frames (CAN-FD or 8-byte Classical fallback)
+    for t in range(0, total_us + 1, telemetry_us):
+        telem_id = encode_j1939_can_id(priority=6, pgn=PGN_OBC_TELEMETRY, sa=CAN_SA_OBC)
+        if config.enable_can_fd:
             telem_payload = synthesize_obc_telemetry_payload(
                 v_dclink=config.v_dclink_nominal,
                 v_batt=config.v_batt_nominal,
                 i_grid=config.i_grid_nominal,
                 i_batt=config.i_batt_nominal,
-                is_64_byte=config.enable_can_fd,
+                is_64_byte=True,
             )
             frames.append(
                 CanFdFrame(
                     arbitration_id=telem_id,
                     data=telem_payload,
                     is_extended_id=True,
-                    is_fd=config.enable_can_fd,
-                    bit_rate_switch=config.enable_can_fd,
+                    is_fd=True,
+                    bit_rate_switch=True,
                     channel=config.channel,
-                    timestamp_us=t_curr,
+                    timestamp_us=t,
                 )
             )
-
-        # 2. Status frames (Classical CAN)
-        if t_curr % status_us == 0:
-            status_id = encode_j1939_can_id(priority=3, pgn=PGN_OBC_STATUS, sa=CAN_SA_OBC)
-            status_payload = synthesize_obc_status_payload(
-                v_dclink=config.v_dclink_nominal,
-                v_batt=config.v_batt_nominal,
-                i_batt=config.i_batt_nominal,
-                i_grid=config.i_grid_nominal,
-            )
+        else:
+            # Classical CAN 8-byte core fallback (e.g., 2x 32-bit float V_dc and I_batt)
+            fallback_payload = struct.pack(">ff", float(config.v_dclink_nominal), float(config.i_batt_nominal))
             frames.append(
                 CanFdFrame(
-                    arbitration_id=status_id,
-                    data=status_payload,
+                    arbitration_id=telem_id,
+                    data=fallback_payload,
                     is_extended_id=True,
                     is_fd=False,
+                    bit_rate_switch=False,
                     channel=config.channel,
-                    timestamp_us=t_curr,
+                    timestamp_us=t,
                 )
             )
 
-        # 3. ISO 15118 EVCC Demand frames
-        if t_curr % iso15118_us == 0:
-            evcc_id = encode_j1939_can_id(priority=3, pgn=PGN_ISO15118_EVCC, sa=CAN_SA_EVCC)
-            evcc_payload = synthesize_iso15118_evcc_payload(
-                v_target=config.v_batt_nominal + 2.0,
-                i_limit=config.i_batt_nominal,
-                soc=0.55 + (t_curr / max(1, total_us)) * 0.1,
+    # 2. Status frames (Classical CAN)
+    for t in range(0, total_us + 1, status_us):
+        status_id = encode_j1939_can_id(priority=3, pgn=PGN_OBC_STATUS, sa=CAN_SA_OBC)
+        status_payload = synthesize_obc_status_payload(
+            v_dclink=config.v_dclink_nominal,
+            v_batt=config.v_batt_nominal,
+            i_batt=config.i_batt_nominal,
+            i_grid=config.i_grid_nominal,
+        )
+        frames.append(
+            CanFdFrame(
+                arbitration_id=status_id,
+                data=status_payload,
+                is_extended_id=True,
+                is_fd=False,
+                channel=config.channel,
+                timestamp_us=t,
             )
-            frames.append(
-                CanFdFrame(
-                    arbitration_id=evcc_id,
-                    data=evcc_payload,
-                    is_extended_id=True,
-                    is_fd=False,
-                    channel=config.channel,
-                    timestamp_us=t_curr,
-                )
-            )
+        )
 
-        # 4. Periodic UDS queries (TesterPresent 0x3E 00)
-        if t_curr % uds_us == 0 and t_curr > 0:
-            frames.append(
-                CanFdFrame(
-                    arbitration_id=CAN_ID_UDS_FUNC,
-                    data=bytes([0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]),
-                    is_extended_id=False,
-                    is_fd=False,
-                    channel=config.channel,
-                    timestamp_us=t_curr,
-                )
+    # 3. ISO 15118 EVCC Demand frames
+    for t in range(0, total_us + 1, iso15118_us):
+        evcc_id = encode_j1939_can_id(priority=3, pgn=PGN_ISO15118_EVCC, sa=CAN_SA_EVCC)
+        evcc_payload = synthesize_iso15118_evcc_payload(
+            v_target=config.v_batt_nominal + 2.0,
+            i_limit=config.i_batt_nominal,
+            soc=0.55 + (t / max(1, total_us)) * 0.1,
+        )
+        frames.append(
+            CanFdFrame(
+                arbitration_id=evcc_id,
+                data=evcc_payload,
+                is_extended_id=True,
+                is_fd=False,
+                channel=config.channel,
+                timestamp_us=t,
             )
+        )
 
-        t_curr += step_delta_us
+    # 4. Periodic UDS queries (TesterPresent 0x3E 00)
+    for t in range(uds_us, total_us + 1, uds_us):
+        frames.append(
+            CanFdFrame(
+                arbitration_id=CAN_ID_UDS_FUNC,
+                data=bytes([0x02, 0x3E, 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA]),
+                is_extended_id=False,
+                is_fd=False,
+                channel=config.channel,
+                timestamp_us=t,
+            )
+        )
+
+    # 5. Fault frame injection (microsecond-precise)
+    if config.fault_injection_time_ms is not None:
+        fault_target_us = int(round(config.fault_injection_time_ms * 1000.0))
+        spn = config.fault_spn or SPN_OBC_DCLINK_OVP
+        fault_frame = synthesize_j1939_dm1_fault_frame(
+            spn=spn,
+            fmi=config.fault_fmi,
+            sa=CAN_SA_OBC,
+            timestamp_us=fault_target_us,
+            channel=config.channel,
+        )
+        frames.append(fault_frame)
 
     # Sort strictly by timestamp_us
     frames.sort(key=lambda f: f.timestamp_us)
@@ -336,11 +346,13 @@ def export_stress_stream_to_event_replay_jsonl(
     """Export frames to event-replay JSONL stream format with SHA-256 validation."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     stream = EventStream(name="obc_stress_stream")
+    base_dt = datetime(2026, 11, 6, 13, 0, 0, tzinfo=timezone.utc)
     for idx, f in enumerate(frames):
+        event_dt = base_dt + timedelta(microseconds=f.timestamp_us)
         ev = f.to_recorded_event(
             seq_id=idx + 1,
             stream_topic=topic,
-            iso_timestamp=f"2026-11-06T13:00:{f.timestamp_us * 1e-6:09.6f}Z",
+            iso_timestamp=event_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         )
         stream.append_raw(ev)
 

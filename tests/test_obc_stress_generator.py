@@ -231,3 +231,68 @@ def test_cross_repo_obc_bisection_isolation(tmp_path):
     assert bisect_res["failing_index"] == fault_idx
     assert bisect_res["probes_executed"] <= 8
     assert "J1939 DM1 Red Stop: SPN 520197" in bisect_res["trip_reason"]
+
+
+def test_f01_no_can_fd_classical_fallback():
+    """F-01 Regression: Ensure enable_can_fd=False generates valid 8-byte Classical CAN frames."""
+    cfg = ObcStressScenarioConfig(duration_ms=10.0, enable_can_fd=False)
+    frames = generate_obc_stress_stream(cfg)
+    assert len(frames) > 0
+    for f in frames:
+        assert not f.is_fd
+        assert f.dlc <= 8
+
+
+def test_f02_iso8601_second_overflow_beyond_60s(tmp_path):
+    """F-02 Regression: Ensure durations >= 60s format valid ISO-8601 timestamps without crashing ReplayEngine."""
+    from event_replay.domain.stream import EventStream
+    from event_replay.domain.engine import ReplayEngine
+    from event_replay.domain.models import ReplayConfig, ReplayClockMode
+    from event_replay.adapters.dry_run_sink import DryRunSink
+
+    cfg = ObcStressScenarioConfig(
+        duration_ms=65000.0,
+        telemetry_interval_ms=10000.0,
+        status_interval_ms=10000.0,
+        iso15118_interval_ms=10000.0,
+        uds_poll_interval_ms=10000.0,
+    )
+    frames = generate_obc_stress_stream(cfg)
+    jsonl_path = tmp_path / "long_scenario.jsonl"
+    count = export_stress_stream_to_event_replay_jsonl(frames, jsonl_path)
+    assert count == len(frames)
+
+    stream = EventStream.from_jsonl(jsonl_path)
+    sink = DryRunSink(session_id="test_sess")
+    config = ReplayConfig(session_id="test_sess", clock_mode=ReplayClockMode.IMMEDIATE_STEP)
+    engine = ReplayEngine(config=config, sink=sink)
+    result = engine.run(stream.iter_events())
+    assert result.events_replayed == len(frames)
+
+
+def test_f03_phase_aliasing_harmonic_intervals():
+    """F-03 Regression: Ensure fractional intervals (e.g. 1.5ms) do not experience phase aliasing frame drops."""
+    cfg = ObcStressScenarioConfig(duration_ms=10.0, telemetry_interval_ms=1.5)
+    frames = generate_obc_stress_stream(cfg)
+    telem = [f for f in frames if ((f.arbitration_id >> 8) & 0x3FFFF) == 0x00FF51]
+    assert [f.timestamp_us for f in telem] == [0, 1500, 3000, 4500, 6000, 7500, 9000]
+
+
+def test_f04_microsecond_precise_fault_timestamp():
+    """F-04 Regression: Ensure fractional fault injection times maintain microsecond precision."""
+    cfg = ObcStressScenarioConfig(duration_ms=20.0, fault_injection_time_ms=12.345)
+    frames = generate_obc_stress_stream(cfg)
+    fault = next(f for f in frames if ((f.arbitration_id >> 8) & 0x3FFFF) == PGN_DM1_ACTIVE_DTC)
+    assert fault.timestamp_us == 12345
+
+
+def test_f05_config_bounds_validation():
+    """F-05 Regression: Ensure all interval fields and FMI ranges are validated strictly."""
+    with pytest.raises(ValueError, match="strictly positive"):
+        ObcStressScenarioConfig(iso15118_interval_ms=0.0)
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        ObcStressScenarioConfig(uds_poll_interval_ms=-5.0)
+
+    with pytest.raises(ValueError, match="fault_fmi"):
+        ObcStressScenarioConfig(fault_fmi=32)
